@@ -1,0 +1,24 @@
+# Binaries and executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+autonexus.exe
+
+# Test artifacts
+*.test
+__debug_bin*
+
+# Local runtime configuration
+config.json
+
+# Logs
+*.log
+
+# IDE & Editor folders
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

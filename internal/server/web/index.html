@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AutoNexus - 自动化任务批量调度</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: #111827;
+      --card-border: #1f293d;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --terminal-bg: #030712;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding-bottom: 30px;
+    }
+    header {
+      background: rgba(17, 24, 39, 0.85);
+      backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      border-bottom: 1px solid var(--card-border);
+      padding: 12px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 1.15rem; }
+    .brand span.logo { font-size: 1.4rem; }
+    .ws-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background-color: var(--danger); }
+    .dot.connected { background-color: var(--success); box-shadow: 0 0 8px var(--success); }
+
+    .container { max-width: 900px; margin: 0 auto; padding: 16px; }
+
+    /* 状态面板 */
+    .status-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 18px;
+      margin-bottom: 16px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    }
+    .status-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 12px;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+    .badge-IDLE { background: #064e3b; color: #6ee7b7; }
+    .badge-RUNNING { background: #1e3a8a; color: #93c5fd; animation: pulse 2s infinite; }
+    .badge-COOLING { background: #78350f; color: #fde68a; }
+    .badge-STOPPING { background: #7f1d1d; color: #fca5a5; }
+    .badge-PREPARE { background: #312e81; color: #c7d2fe; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+
+    .status-body {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .stat-item {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 10px;
+      padding: 10px;
+      text-align: center;
+    }
+    .stat-label { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px; }
+    .stat-val { font-size: 1.25rem; font-weight: 700; color: #fff; }
+
+    /* 控制按钮 */
+    .controls { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
+    .btn {
+      appearance: none;
+      border: none;
+      border-radius: 12px;
+      padding: 14px 18px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-danger { background: #dc2626; color: #fff; }
+    .btn-danger:hover { background: #b91c1c; }
+    .btn-sm { padding: 6px 12px; font-size: 0.8rem; border-radius: 8px; }
+    .btn-secondary { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+    .btn-secondary:hover { background: rgba(255, 255, 255, 0.15); }
+    .btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* 任务列表 */
+    .section-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin: 20px 0 10px 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .task-list { display: flex; flex-direction: column; gap: 10px; }
+    .task-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      transition: border-color 0.2s;
+    }
+    .task-card.active { border-color: var(--primary); box-shadow: 0 0 12px rgba(59, 130, 246, 0.25); }
+    .task-card.disabled { opacity: 0.55; }
+    .task-row { display: flex; justify-content: space-between; align-items: center; }
+    .task-info { flex: 1; min-width: 0; }
+    .task-name { font-weight: 600; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .task-meta { font-size: 0.75rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+    .meta-tag { background: rgba(255, 255, 255, 0.05); padding: 2px 6px; border-radius: 4px; }
+    .empty-hint {
+      text-align: center;
+      padding: 30px 16px;
+      background: var(--card-bg);
+      border: 1px dashed var(--card-border);
+      border-radius: 14px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    /* 切换开关 Switch */
+    .switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #374151; transition: .3s; border-radius: 24px;
+    }
+    .slider:before {
+      position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px;
+      background-color: white; transition: .3s; border-radius: 50%;
+    }
+    input:checked + .slider { background-color: var(--success); }
+    input:checked + .slider:before { transform: translateX(20px); }
+
+    /* 终端视窗 */
+    .terminal-container {
+      background: var(--terminal-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      overflow: hidden;
+      margin-top: 18px;
+    }
+    .terminal-header {
+      background: #0f172a;
+      padding: 8px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--card-border);
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    .terminal-body {
+      height: 320px;
+      overflow-y: auto;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.8rem;
+      line-height: 1.45;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .log-line { word-break: break-all; white-space: pre-wrap; }
+    .log-time { color: #6b7280; margin-right: 6px; user-select: none; }
+    .log-tag { font-weight: 700; margin-right: 6px; }
+    .stream-system { color: #38bdf8; }
+    .stream-stdout { color: #e2e8f0; }
+    .stream-stderr { color: #f87171; }
+    .tag-SCHEDULER { color: #c084fc; }
+
+    /* 模态弹窗 Modal */
+    .modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(4px);
+      z-index: 100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      width: 100%;
+      max-width: 540px;
+      max-height: 90vh;
+      overflow-y: auto;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    }
+    .modal-title { font-size: 1.15rem; font-weight: 700; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+    .form-group { margin-bottom: 12px; }
+    .form-label { display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px; font-weight: 600; }
+    .form-input {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid #475569;
+      background: #0f172a;
+      color: #fff;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .form-input:focus { border-color: var(--primary); }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+
+    /* 文件浏览器行项目 */
+    .fb-item {
+      display: flex;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      user-select: none;
+      transition: background 0.15s;
+    }
+    .fb-item:hover { background: rgba(255, 255, 255, 0.08); }
+    .fb-item.file { color: #93c5fd; }
+    .fb-item.file:hover { background: rgba(59, 130, 246, 0.2); }
+
+    /* 移动端细微优化 */
+    @media (max-width: 600px) {
+      .controls { grid-template-columns: 1fr; }
+      .terminal-body { height: 260px; }
+      .form-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <span class="logo">⚡</span>
+      <span>AutoNexus</span>
+    </div>
+    <div class="ws-indicator">
+      <div id="wsDot" class="dot"></div>
+      <span id="wsText">连接中...</span>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- 状态卡片 -->
+    <div class="status-card">
+      <div class="status-header">
+        <div>
+          <span style="font-size:0.85rem; color:var(--text-muted);">调度状态</span>
+          <div style="margin-top:4px;">
+            <span id="stateBadge" class="badge badge-IDLE">IDLE</span>
+          </div>
+        </div>
+        <div id="cooldownBox" style="display:none; text-align:right;">
+          <span style="font-size:0.75rem; color:#fde68a;">系统冷却倒计时</span>
+          <div id="cooldownSec" style="font-size:1.3rem; font-weight:700; color:#fbbf24;">0s</div>
+        </div>
+      </div>
+
+      <div class="status-body">
+        <div class="stat-item">
+          <div class="stat-label">当前执行任务</div>
+          <div id="currentTaskName" class="stat-val" style="font-size:1rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">-</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">单项运行时长</div>
+          <div id="elapsedTime" class="stat-val">0s</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">总进度</div>
+          <div id="progressText" class="stat-val">0 / 0</div>
+        </div>
+      </div>
+
+      <!-- 控制器 -->
+      <div class="controls">
+        <button id="btnStart" class="btn btn-primary" onclick="startQueue()">
+          <span>▶ 一键启动队列</span>
+        </button>
+        <button id="btnStop" class="btn btn-danger" onclick="stopQueue()">
+          <span>⏹ 急停 (Kill)</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 任务编排列表 -->
+    <div class="section-title">
+      <span>任务队列编排</span>
+      <button class="btn btn-primary btn-sm" onclick="openTaskModal()">+ 添加黑盒任务</button>
+    </div>
+    <div id="taskList" class="task-list">
+      <!-- 动态插入任务项 -->
+    </div>
+
+    <!-- 实时终端控制台 -->
+    <div class="terminal-container">
+      <div class="terminal-header">
+        <span>实时控制台日志</span>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-secondary btn-sm" onclick="toggleAutoScroll()" id="btnAutoScroll">自动滚屏: 开</button>
+          <button class="btn btn-secondary btn-sm" onclick="clearLogs()">清屏</button>
+        </div>
+      </div>
+      <div id="terminalBody" class="terminal-body">
+        <div class="log-line stream-system"><span class="log-time">[系统]</span>正在初始化 AutoNexus 调度终端连接...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 添加/编辑任务弹窗 Modal -->
+  <div id="taskModal" class="modal-overlay" onclick="if(event.target===this) closeTaskModal()">
+    <div class="modal-card">
+      <div class="modal-title">
+        <span id="modalTitle">添加新任务</span>
+        <span style="cursor:pointer; color:var(--text-muted);" onclick="closeTaskModal()">✕</span>
+      </div>
+
+      <input type="hidden" id="taskEditMode" value="create">
+
+      <div class="form-group">
+        <label class="form-label">任务唯一标识 ID (可选，留空自动生成)</label>
+        <input type="text" id="taskIdInput" class="form-input" placeholder="例如: madoaxvv_daily">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">任务名称 *</label>
+        <input type="text" id="taskNameInput" class="form-input" placeholder="例如: MaDOAXVV 每日日常">
+      </div>
+
+      <div class="form-group">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+          <label class="form-label" style="margin-bottom:0;">可执行程序完整路径 (黑盒 EXE / 脚本) *</label>
+          <button type="button" class="btn btn-secondary btn-sm" style="padding:2px 8px; font-size:0.75rem;" onclick="openFileBrowser('exe')">📂 浏览选择...</button>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="taskExeInput" class="form-input" placeholder="点击右侧「浏览选择」或手动粘贴路径">
+          <button type="button" class="btn btn-secondary btn-sm" style="white-space:nowrap;" onclick="openFileBrowser('exe')">📂 浏览</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">启动命令行参数 (以空格分隔)</label>
+        <input type="text" id="taskArgsInput" class="form-input" placeholder="例如: run --task daily">
+      </div>
+
+      <div class="form-group">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+          <label class="form-label" style="margin-bottom:0;">工作目录 (留空默认使用程序所在目录)</label>
+          <button type="button" class="btn btn-secondary btn-sm" style="padding:2px 8px; font-size:0.75rem;" onclick="openFileBrowser('dir')">📂 浏览目录...</button>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="taskDirInput" class="form-input" placeholder="留空默认使用可执行文件同级目录">
+          <button type="button" class="btn btn-secondary btn-sm" style="white-space:nowrap;" onclick="openFileBrowser('dir')">📂 浏览</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">关联游戏进程名 (任务完成后自动清理，逗号分隔)</label>
+        <input type="text" id="taskGamesInput" class="form-input" placeholder="例如: DOAXVV.exe, GameClient.exe">
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">最长超时 (秒，0 为不限)</label>
+          <input type="number" id="taskTimeoutInput" class="form-input" value="1800">
+        </div>
+        <div class="form-group">
+          <label class="form-label">静默假死阈值 (秒，GUI程序建议填0禁用)</label>
+          <input type="number" id="taskNoLogInput" class="form-input" value="0">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">任务完成冷却时间 (秒)</label>
+        <input type="number" id="taskCooldownInput" class="form-input" value="8">
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeTaskModal()">取消</button>
+        <button class="btn btn-primary btn-sm" onclick="saveTaskFromModal()">保存并生效</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 宿主机文件/目录选择器模态窗 (Server File Browser Modal) -->
+  <div id="fileBrowserModal" class="modal-overlay" style="z-index:110;" onclick="if(event.target===this) closeFileBrowser()">
+    <div class="modal-card" style="max-width: 580px;">
+      <div class="modal-title">
+        <span id="fbModalTitle">选择可执行文件</span>
+        <span style="cursor:pointer; color:var(--text-muted);" onclick="closeFileBrowser()">✕</span>
+      </div>
+
+      <!-- 盘符快捷按钮与当前路径导航 -->
+      <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:12px;">
+        <div id="fbDrivesBar" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <button class="btn btn-secondary btn-sm" id="fbBtnParent" onclick="fbGoParent()" title="返回上一级">⬆️ 上一级</button>
+          <input type="text" id="fbCurrentPath" class="form-input" style="flex:1; padding:6px 10px; font-size:0.8rem;" readonly>
+        </div>
+      </div>
+
+      <!-- 文件/目录列表容器 -->
+      <div id="fbListContainer" style="height:280px; overflow-y:auto; border:1px solid #334155; border-radius:8px; padding:6px; background:#0b1120;">
+        <!-- 动态渲染条目 -->
+      </div>
+
+      <div class="modal-footer" style="justify-content:space-between; align-items:center;">
+        <div id="fbSelectionHint" style="font-size:0.75rem; color:var(--text-muted);">点击文件夹进入，点击蓝色可执行文件直接选取</div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-secondary btn-sm" onclick="closeFileBrowser()">取消</button>
+          <button class="btn btn-primary btn-sm" id="fbBtnConfirmDir" style="display:none;" onclick="fbSelectCurrentDir()">选取当前目录</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let autoScroll = true;
+    let ws = null;
+    let cachedTasks = [];
+    let currentTaskID = "";
+
+    function toggleAutoScroll() {
+      autoScroll = !autoScroll;
+      document.getElementById('btnAutoScroll').innerText = `自动滚屏: ${autoScroll ? '开' : '关'}`;
+    }
+
+    function clearLogs() {
+      document.getElementById('terminalBody').innerHTML = '';
+    }
+
+    function appendLog(entry) {
+      const tb = document.getElementById('terminalBody');
+      const row = document.createElement('div');
+      row.className = `log-line stream-${entry.stream || 'stdout'}`;
+
+      const timeSpan = `<span class="log-time">${entry.timestamp || ''}</span>`;
+      let tagSpan = '';
+      if (entry.task_id) {
+        tagSpan = `<span class="log-tag tag-${entry.task_id}">[${entry.task_id}]</span>`;
+      }
+      const safeMsg = (entry.message || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+      row.innerHTML = `${timeSpan}${tagSpan}${safeMsg}`;
+      tb.appendChild(row);
+
+      if (tb.childNodes.length > 1200) {
+        tb.removeChild(tb.firstChild);
+      }
+
+      if (autoScroll) {
+        tb.scrollTop = tb.scrollHeight;
+      }
+    }
+
+    // WebSocket 保持与重连
+    function connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const url = `${proto}//${location.host}/ws/logs`;
+
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        document.getElementById('wsDot').className = 'dot connected';
+        document.getElementById('wsText').innerText = '已就绪';
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(evt.data);
+          if (data.type === 'history' && Array.isArray(data.history)) {
+            data.history.forEach(appendLog);
+          } else {
+            appendLog(data);
+          }
+        } catch (e) {}
+      };
+
+      ws.onclose = () => {
+        document.getElementById('wsDot').className = 'dot';
+        document.getElementById('wsText').innerText = '重连中...';
+        setTimeout(connectWS, 2000);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    }
+
+    // 轮询获取状态快照
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/v1/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        renderStatus(data);
+      } catch (e) {}
+    }
+
+    function renderStatus(data) {
+      currentTaskID = data.current_task_id || "";
+      const stateBadge = document.getElementById('stateBadge');
+      stateBadge.innerText = data.state;
+      stateBadge.className = `badge badge-${data.state}`;
+
+      document.getElementById('currentTaskName').innerText = data.current_task_name || '无运行中任务';
+      document.getElementById('elapsedTime').innerText = `${data.elapsed_seconds || 0}s`;
+      document.getElementById('progressText').innerText = `${data.current_task_index || 0} / ${data.total_tasks_count || 0}`;
+
+      const cdBox = document.getElementById('cooldownBox');
+      if (data.state === 'COOLING' && data.cooldown_remaining > 0) {
+        cdBox.style.display = 'block';
+        document.getElementById('cooldownSec').innerText = `${data.cooldown_remaining}s`;
+      } else {
+        cdBox.style.display = 'none';
+      }
+
+      const tasksStr = JSON.stringify(data.tasks);
+      if (tasksStr !== JSON.stringify(cachedTasks)) {
+        cachedTasks = data.tasks || [];
+        renderTaskList(cachedTasks);
+      } else {
+        updateActiveHighlight();
+      }
+    }
+
+    function updateActiveHighlight() {
+      const cards = document.querySelectorAll('.task-card');
+      cards.forEach(card => {
+        const id = card.getAttribute('data-task-id');
+        if (id === currentTaskID) {
+          card.classList.add('active');
+        } else {
+          card.classList.remove('active');
+        }
+      });
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function renderTaskList(tasks) {
+      const container = document.getElementById('taskList');
+      container.innerHTML = '';
+
+      if (tasks.length === 0) {
+        container.innerHTML = `
+          <div class="empty-hint">
+            <div>⚡ 当前队列暂无任务</div>
+            <div style="margin-top:6px; font-size:0.8rem;">点击右上角「+ 添加黑盒任务」，通过文件选择框直接选取可执行程序</div>
+          </div>
+        `;
+        return;
+      }
+
+      tasks.forEach((t, index) => {
+        const card = document.createElement('div');
+        card.className = `task-card ${t.id === currentTaskID ? 'active' : ''} ${!t.enabled ? 'disabled' : ''}`;
+        card.setAttribute('data-task-id', t.id);
+
+        const games = (t.game_process_names && t.game_process_names.length) ? t.game_process_names.join(', ') : '无';
+        const argsStr = (t.args && t.args.length) ? t.args.join(' ') : '';
+
+        const safeName = escapeHtml(t.name || t.id);
+        const safeExe = escapeHtml(t.executable || '');
+        const safeArgs = escapeHtml(argsStr);
+        const safeGames = escapeHtml(games);
+
+        card.innerHTML = `
+          <div class="task-row">
+            <div class="task-info">
+              <div class="task-name" title="${safeName}">${safeName}</div>
+              <div style="font-size:0.75rem; color:#60a5fa; margin-top:2px; font-family:monospace; word-break:break-all;">
+                ${safeExe} ${safeArgs}
+              </div>
+              <div class="task-meta">
+                <span class="meta-tag">超时: ${t.timeout_seconds ? t.timeout_seconds + 's' : '不限'}</span>
+                <span class="meta-tag">假死检测: ${t.no_log_timeout_seconds ? t.no_log_timeout_seconds + 's' : '关'}</span>
+                <span class="meta-tag">冷却: ${(t.cooldown_seconds ?? 5)}s</span>
+                <span class="meta-tag">进程清理: ${safeGames}</span>
+              </div>
+            </div>
+            <label class="switch" style="margin-left:10px;">
+              <input type="checkbox" ${t.enabled ? 'checked' : ''} onchange="toggleTaskByIndex(${index})">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="task-row" style="margin-top:4px;">
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button class="btn btn-secondary btn-sm" onclick="moveTask(${index}, -1)" ${index === 0 ? 'disabled' : ''}>▲ 上移</button>
+              <button class="btn btn-secondary btn-sm" onclick="moveTask(${index}, 1)" ${index === tasks.length - 1 ? 'disabled' : ''}>▼ 下移</button>
+              <button class="btn btn-secondary btn-sm" onclick="editTaskByIndex(${index})">✏️ 编辑</button>
+              <button class="btn btn-secondary btn-sm" style="color:#fca5a5;" onclick="deleteTaskByIndex(${index})">🗑️ 删除</button>
+            </div>
+            <button class="btn btn-secondary btn-sm" onclick="runTaskByIndex(${index})">⚡ 调试</button>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    // 模态弹窗控制
+    function openTaskModal(task = null) {
+      const modal = document.getElementById('taskModal');
+      const title = document.getElementById('modalTitle');
+      const mode = document.getElementById('taskEditMode');
+      const idInput = document.getElementById('taskIdInput');
+
+      if (task) {
+        title.innerText = '编辑任务配置';
+        mode.value = 'edit';
+        idInput.value = task.id;
+        idInput.disabled = true;
+        document.getElementById('taskNameInput').value = task.name || '';
+        document.getElementById('taskExeInput').value = task.executable || '';
+        document.getElementById('taskArgsInput').value = (task.args || []).join(' ');
+        document.getElementById('taskDirInput').value = task.working_dir || '';
+        document.getElementById('taskGamesInput').value = (task.game_process_names || []).join(', ');
+        document.getElementById('taskTimeoutInput').value = task.timeout_seconds ?? 1800;
+        document.getElementById('taskNoLogInput').value = task.no_log_timeout_seconds ?? 0;
+        document.getElementById('taskCooldownInput').value = task.cooldown_seconds ?? 5;
+      } else {
+        title.innerText = '添加黑盒任务';
+        mode.value = 'create';
+        idInput.value = '';
+        idInput.disabled = false;
+        document.getElementById('taskNameInput').value = '';
+        document.getElementById('taskExeInput').value = '';
+        document.getElementById('taskArgsInput').value = '';
+        document.getElementById('taskDirInput').value = '';
+        document.getElementById('taskGamesInput').value = '';
+        document.getElementById('taskTimeoutInput').value = 1800;
+        document.getElementById('taskNoLogInput').value = 0;
+        document.getElementById('taskCooldownInput').value = 5;
+      }
+
+      modal.style.display = 'flex';
+    }
+
+    function closeTaskModal() {
+      document.getElementById('taskModal').style.display = 'none';
+    }
+
+    function editTaskByIndex(index) {
+      if (index >= 0 && index < cachedTasks.length) {
+        openTaskModal(cachedTasks[index]);
+      }
+    }
+
+    function parseCommandLine(cmdStr) {
+      if (!cmdStr || !cmdStr.trim()) return [];
+      const args = [];
+      let current = '';
+      let inQuote = false;
+      let quoteChar = '';
+      for (let i = 0; i < cmdStr.length; i++) {
+        const c = cmdStr[i];
+        if (!inQuote && (c === '"' || c === "'")) {
+          inQuote = true;
+          quoteChar = c;
+        } else if (inQuote && c === quoteChar) {
+          inQuote = false;
+          quoteChar = '';
+        } else if (!inQuote && /\s/.test(c)) {
+          if (current.length > 0) {
+            args.push(current);
+            current = '';
+          }
+        } else {
+          current += c;
+        }
+      }
+      if (current.length > 0) {
+        args.push(current);
+      }
+      return args;
+    }
+
+    async function saveTaskFromModal() {
+      const mode = document.getElementById('taskEditMode').value;
+      const id = document.getElementById('taskIdInput').value.trim();
+      const name = document.getElementById('taskNameInput').value.trim();
+      const exe = document.getElementById('taskExeInput').value.trim();
+      const argsRaw = document.getElementById('taskArgsInput').value.trim();
+      const dir = document.getElementById('taskDirInput').value.trim();
+      const gamesRaw = document.getElementById('taskGamesInput').value.trim();
+      const rawTimeout = document.getElementById('taskTimeoutInput').value.trim();
+      const rawNoLog = document.getElementById('taskNoLogInput').value.trim();
+      const rawCooldown = document.getElementById('taskCooldownInput').value.trim();
+
+      const timeout = rawTimeout === '' ? 1800 : parseInt(rawTimeout);
+      const noLog = rawNoLog === '' ? 0 : parseInt(rawNoLog);
+      const cooldown = rawCooldown === '' ? 5 : parseInt(rawCooldown);
+
+      if (!exe) {
+        alert('请指定执行程序路径（可点击右侧浏览选择）！');
+        return;
+      }
+
+      // 精确解析命令行参数，支持引号包裹并剥离外层引号
+      const args = parseCommandLine(argsRaw);
+      const games = gamesRaw ? gamesRaw.split(',').map(s => s.trim()).filter(s => s) : [];
+
+      // 编辑模式下保留原始的启用/禁用状态，添加模式默认为 true
+      let isEnabled = true;
+      if (mode === 'edit') {
+        const existing = cachedTasks.find(t => t.id === id);
+        if (existing && typeof existing.enabled === 'boolean') {
+          isEnabled = existing.enabled;
+        }
+      }
+
+      const payload = {
+        id: id,
+        name: name || id || '未命名任务',
+        enabled: isEnabled,
+        executable: exe,
+        args: args,
+        working_dir: dir,
+        game_process_names: games,
+        timeout_seconds: isNaN(timeout) ? 1800 : timeout,
+        no_log_timeout_seconds: isNaN(noLog) ? 0 : noLog,
+        cooldown_seconds: isNaN(cooldown) ? 5 : cooldown,
+      };
+
+      try {
+        let res;
+        if (mode === 'edit') {
+          res = await fetch(`/api/v1/tasks/${encodeURIComponent(id)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        } else {
+          res = await fetch('/api/v1/tasks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        }
+
+        if (!res.ok) {
+          const err = await res.json();
+          alert('保存失败: ' + (err.error || res.statusText));
+          return;
+        }
+
+        closeTaskModal();
+        fetchStatus();
+      } catch (e) {
+        alert('网络请求失败: ' + e);
+      }
+    }
+
+    async function deleteTaskByIndex(index) {
+      const task = cachedTasks[index];
+      if (!task) return;
+      if (confirm(`确定要删除任务 [${task.name || task.id}] 吗？`)) {
+        try {
+          const res = await fetch(`/api/v1/tasks/${encodeURIComponent(task.id)}`, { method: 'DELETE' });
+          if (!res.ok) {
+            const err = await res.json();
+            alert('删除失败: ' + (err.error || res.statusText));
+            return;
+          }
+          fetchStatus();
+        } catch (e) {
+          alert('网络错误: ' + e);
+        }
+      }
+    }
+
+    // ================= 文件/目录浏览器 (Server File Browser) =================
+    let fbTargetMode = 'exe';
+    let fbCurrentDir = '';
+    let fbParentDir = '';
+
+    async function openFileBrowser(mode = 'exe') {
+      fbTargetMode = mode;
+      document.getElementById('fbModalTitle').innerText = mode === 'dir' ? '选择工作目录' : '选择可执行程序 (EXE/脚本)';
+      document.getElementById('fbBtnConfirmDir').style.display = mode === 'dir' ? 'block' : 'none';
+      document.getElementById('fbSelectionHint').innerText = mode === 'dir' ? '进入目标目录后，点击右下角「选取当前目录」' : '点击文件夹进入，点击蓝色可执行文件直接选取';
+      document.getElementById('fileBrowserModal').style.display = 'flex';
+
+      let startPath = '';
+      if (mode === 'exe' && document.getElementById('taskExeInput').value) {
+        startPath = document.getElementById('taskExeInput').value;
+      } else if (mode === 'dir' && document.getElementById('taskDirInput').value) {
+        startPath = document.getElementById('taskDirInput').value;
+      }
+      await loadFSDir(startPath);
+    }
+
+    function closeFileBrowser() {
+      document.getElementById('fileBrowserModal').style.display = 'none';
+    }
+
+    async function loadFSDir(path = '') {
+      const container = document.getElementById('fbListContainer');
+      container.innerHTML = '<div style="color:var(--text-muted); padding:10px;">正在加载目录...</div>';
+
+      try {
+        const res = await fetch('/api/v1/fs/browse?path=' + encodeURIComponent(path));
+        if (!res.ok) {
+          const err = await res.json();
+          container.innerHTML = `<div style="color:#f87171; padding:10px;">读取失败: ${err.error || res.statusText}</div>`;
+          return;
+        }
+        const data = await res.json();
+        fbCurrentDir = data.current || '';
+        fbParentDir = data.parent || '';
+        document.getElementById('fbCurrentPath').value = fbCurrentDir || '请选择盘符';
+
+        // 渲染盘符
+        const drivesBar = document.getElementById('fbDrivesBar');
+        drivesBar.innerHTML = '';
+        if (data.drives && data.drives.length) {
+          data.drives.forEach(d => {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-secondary btn-sm';
+            btn.style.padding = '2px 8px';
+            btn.style.fontSize = '0.75rem';
+            btn.innerText = `💽 ${d}`;
+            btn.onclick = () => loadFSDir(d + '\\');
+            drivesBar.appendChild(btn);
+          });
+        }
+
+        document.getElementById('fbBtnParent').disabled = !fbParentDir;
+
+        container.innerHTML = '';
+        if (!data.folders.length && (!data.files || !data.files.length)) {
+          container.innerHTML = '<div style="color:var(--text-muted); padding:12px; text-align:center;">此目录下无匹配项</div>';
+          return;
+        }
+
+        // 渲染文件夹
+        data.folders.forEach(f => {
+          const row = document.createElement('div');
+          row.className = 'fb-item';
+          row.innerHTML = `<span style="margin-right:8px;">📁</span><span style="flex:1; word-break:break-all;">${f.name}</span>`;
+          row.onclick = () => loadFSDir(f.path);
+          container.appendChild(row);
+        });
+
+        // 渲染文件 (仅在 mode === 'exe' 时展示)
+        if (fbTargetMode === 'exe' && data.files) {
+          data.files.forEach(f => {
+            const row = document.createElement('div');
+            row.className = 'fb-item file';
+            row.innerHTML = `<span style="margin-right:8px;">⚡</span><span style="flex:1; font-weight:600; word-break:break-all;">${f.name}</span>`;
+            row.onclick = () => selectFile(f.path, f.name);
+            container.appendChild(row);
+          });
+        }
+      } catch (e) {
+        container.innerHTML = `<div style="color:#f87171; padding:10px;">网络错误: ${e}</div>`;
+      }
+    }
+
+    function fbGoParent() {
+      if (fbParentDir) {
+        loadFSDir(fbParentDir);
+      }
+    }
+
+    function selectFile(filePath, fileName) {
+      document.getElementById('taskExeInput').value = filePath;
+      const dirInput = document.getElementById('taskDirInput');
+      if (!dirInput.value && fbCurrentDir) {
+        dirInput.value = fbCurrentDir;
+      }
+      const nameInput = document.getElementById('taskNameInput');
+      if (!nameInput.value && fileName) {
+        nameInput.value = fileName.replace(/\.[^/.]+$/, "");
+      }
+      closeFileBrowser();
+    }
+
+    function fbSelectCurrentDir() {
+      if (fbCurrentDir) {
+        document.getElementById('taskDirInput').value = fbCurrentDir;
+      }
+      closeFileBrowser();
+    }
+
+    // 控制动作
+    async function startQueue() {
+      await fetch('/api/v1/queue/start', { method: 'POST' });
+      fetchStatus();
+    }
+
+    async function stopQueue() {
+      await fetch('/api/v1/queue/stop', { method: 'POST' });
+      fetchStatus();
+    }
+
+    async function toggleTaskByIndex(index) {
+      const task = cachedTasks[index];
+      if (task) {
+        await toggleTask(task.id);
+      }
+    }
+
+    async function runTaskByIndex(index) {
+      const task = cachedTasks[index];
+      if (task) {
+        await runSingleTask(task.id);
+      }
+    }
+
+    async function runSingleTask(id) {
+      await fetch(`/api/v1/tasks/${encodeURIComponent(id)}/run`, { method: 'POST' });
+      fetchStatus();
+    }
+
+    async function toggleTask(id) {
+      await fetch(`/api/v1/tasks/${encodeURIComponent(id)}/toggle`, { method: 'POST' });
+      fetchStatus();
+    }
+
+    async function moveTask(index, offset) {
+      const targetIndex = index + offset;
+      if (targetIndex < 0 || targetIndex >= cachedTasks.length) return;
+
+      const newTasks = [...cachedTasks];
+      const item = newTasks.splice(index, 1)[0];
+      newTasks.splice(targetIndex, 0, item);
+
+      const taskIDs = newTasks.map(t => t.id);
+      await fetch('/api/v1/tasks/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_ids: taskIDs })
+      });
+      fetchStatus();
+    }
+
+    // 启动初始化
+    window.addEventListener('DOMContentLoaded', () => {
+      connectWS();
+      fetchStatus();
+      setInterval(fetchStatus, 1000);
+    });
+  </script>
+</body>
+</html>
