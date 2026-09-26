@@ -47,14 +47,18 @@ func (r *Runner) Run(ctx context.Context, task *config.TaskConfig) (res *TaskRes
 		Success: false,
 	}
 
-	r.broadcaster.EmitSystemLog(task.ID, fmt.Sprintf(">>> 准备启动任务 [%s] (%s)", task.Name, task.Executable))
+	// 1. 提前剥离可执行文件路径与工作目录外层多余引号
+	exePath := strings.Trim(strings.TrimSpace(task.Executable), `"'`)
+	workingDir := strings.Trim(strings.TrimSpace(task.WorkingDir), `"'`)
+
+	r.broadcaster.EmitSystemLog(task.ID, fmt.Sprintf(">>> 准备启动任务 [%s] (%s)", task.Name, exePath))
 
 	// 解除 Windows 下载文件锁定，防止系统弹出 "打开文件 - 安全警告"
 	if runtime.GOOS == "windows" {
-		_ = os.Remove(task.Executable + ":Zone.Identifier")
+		_ = os.Remove(exePath + ":Zone.Identifier")
 	}
 
-	// 1. 创建专用 Win32 Job Object
+	// 2. 创建专用 Win32 Job Object
 	job, err := procjob.NewJob()
 	if err != nil {
 		res.ErrorMsg = fmt.Sprintf("创建 Win32 JobObject 失败: %v", err)
@@ -67,21 +71,28 @@ func (r *Runner) Run(ctx context.Context, task *config.TaskConfig) (res *TaskRes
 		_ = job.Close()
 	}()
 
-	// 2. 准备执行命令（自动剥离多余的外层引号，防止 Windows 子进程接收到字面量双引号）
+	// 3. 准备执行命令（剥离命令行参数外层多余引号）
 	cleanArgs := make([]string, len(task.Args))
 	for i, arg := range task.Args {
-		if len(arg) >= 2 && ((arg[0] == '"' && arg[len(arg)-1] == '"') || (arg[0] == '\'' && arg[len(arg)-1] == '\'')) {
-			cleanArgs[i] = arg[1 : len(arg)-1]
+		trimmed := strings.TrimSpace(arg)
+		if len(trimmed) >= 2 && ((trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"') || (trimmed[0] == '\'' && trimmed[len(trimmed)-1] == '\'')) {
+			cleanArgs[i] = trimmed[1 : len(trimmed)-1]
 		} else {
 			cleanArgs[i] = arg
 		}
 	}
-	cmd := exec.Command(task.Executable, cleanArgs...)
-	if task.WorkingDir != "" {
-		cmd.Dir = task.WorkingDir
+	cmd := exec.Command(exePath, cleanArgs...)
+	if workingDir != "" {
+		cmd.Dir = workingDir
 	} else {
-		cmd.Dir = filepath.Dir(task.Executable)
+		cmd.Dir = filepath.Dir(exePath)
 	}
+
+	// 注入 Python 无缓冲与 UTF-8 编码环境变量，杜绝因管道块缓冲引起的假死检测误杀与编码报错
+	cmd.Env = append(os.Environ(),
+		"PYTHONUNBUFFERED=1",
+		"PYTHONIOENCODING=utf-8",
+	)
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -258,10 +269,15 @@ waitLoop:
 // KillProcessesByName 尝试按进程名强制终结残留的外部进程（如 DOAXVV.exe）
 func KillProcessesByName(processNames []string) []string {
 	var killed []string
-	for _, name := range processNames {
-		name = strings.TrimSpace(name)
-		if name == "" {
+	for _, rawName := range processNames {
+		name := strings.Trim(strings.TrimSpace(rawName), `"'`)
+		name = filepath.Base(name)
+		if name == "" || name == "." {
 			continue
+		}
+		// 缺省容错：若未提供 .exe 后缀，自动补齐以确保 taskkill /IM 能精准匹配 Windows 进程映像
+		if !strings.HasSuffix(strings.ToLower(name), ".exe") {
+			name += ".exe"
 		}
 		// /F 强制终止，/T 终止该进程及其派生子进程，/IM 指定映像名称
 		cmd := exec.Command("taskkill", "/F", "/T", "/IM", name)

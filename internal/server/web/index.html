@@ -601,6 +601,31 @@
         .replace(/'/g, '&#39;');
     }
 
+    function formatCommandLine(args) {
+      if (!args || !args.length) return '';
+      return args.map(arg => {
+        if (arg === '') return '""';
+        if (/[\s"]/.test(arg)) {
+          let escaped = arg.replace(/"/g, '\\"');
+          const trailing = escaped.match(/\\+$/);
+          if (trailing) {
+            escaped += trailing[0];
+          }
+          return `"${escaped}"`;
+        }
+        return arg;
+      }).join(' ');
+    }
+
+    function stripWrappingQuotes(str) {
+      if (!str) return '';
+      str = str.trim();
+      if ((str.startsWith('"') && str.endsWith('"')) || (str.startsWith("'") && str.endsWith("'"))) {
+        return str.slice(1, -1).trim();
+      }
+      return str;
+    }
+
     function renderTaskList(tasks) {
       const container = document.getElementById('taskList');
       container.innerHTML = '';
@@ -621,7 +646,7 @@
         card.setAttribute('data-task-id', t.id);
 
         const games = (t.game_process_names && t.game_process_names.length) ? t.game_process_names.join(', ') : '无';
-        const argsStr = (t.args && t.args.length) ? t.args.join(' ') : '';
+        const argsStr = formatCommandLine(t.args);
 
         const safeName = escapeHtml(t.name || t.id);
         const safeExe = escapeHtml(t.executable || '');
@@ -675,7 +700,7 @@
         idInput.disabled = true;
         document.getElementById('taskNameInput').value = task.name || '';
         document.getElementById('taskExeInput').value = task.executable || '';
-        document.getElementById('taskArgsInput').value = (task.args || []).join(' ');
+        document.getElementById('taskArgsInput').value = formatCommandLine(task.args);
         document.getElementById('taskDirInput').value = task.working_dir || '';
         document.getElementById('taskGamesInput').value = (task.game_process_names || []).join(', ');
         document.getElementById('taskTimeoutInput').value = task.timeout_seconds ?? 1800;
@@ -715,24 +740,49 @@
       let current = '';
       let inQuote = false;
       let quoteChar = '';
+      let hasToken = false;
       for (let i = 0; i < cmdStr.length; i++) {
         const c = cmdStr[i];
+        if (inQuote && c === '\\' && i + 1 < cmdStr.length) {
+          const next = cmdStr[i + 1];
+          if (next === quoteChar) {
+            // 区分 Windows 路径末尾反斜杠闭合引号 vs 内部转义双引号
+            if (i + 2 >= cmdStr.length || /\s/.test(cmdStr[i + 2])) {
+              current += '\\';
+              inQuote = false;
+              quoteChar = '';
+              i++;
+              continue;
+            } else {
+              current += quoteChar;
+              i++;
+              continue;
+            }
+          } else if (next === '\\') {
+            current += '\\';
+            i++;
+            continue;
+          }
+        }
         if (!inQuote && (c === '"' || c === "'")) {
           inQuote = true;
           quoteChar = c;
+          hasToken = true;
         } else if (inQuote && c === quoteChar) {
           inQuote = false;
           quoteChar = '';
         } else if (!inQuote && /\s/.test(c)) {
-          if (current.length > 0) {
+          if (hasToken) {
             args.push(current);
             current = '';
+            hasToken = false;
           }
         } else {
           current += c;
+          hasToken = true;
         }
       }
-      if (current.length > 0) {
+      if (hasToken) {
         args.push(current);
       }
       return args;
@@ -742,9 +792,9 @@
       const mode = document.getElementById('taskEditMode').value;
       const id = document.getElementById('taskIdInput').value.trim();
       const name = document.getElementById('taskNameInput').value.trim();
-      const exe = document.getElementById('taskExeInput').value.trim();
+      const exe = stripWrappingQuotes(document.getElementById('taskExeInput').value);
       const argsRaw = document.getElementById('taskArgsInput').value.trim();
-      const dir = document.getElementById('taskDirInput').value.trim();
+      const dir = stripWrappingQuotes(document.getElementById('taskDirInput').value);
       const gamesRaw = document.getElementById('taskGamesInput').value.trim();
       const rawTimeout = document.getElementById('taskTimeoutInput').value.trim();
       const rawNoLog = document.getElementById('taskNoLogInput').value.trim();
