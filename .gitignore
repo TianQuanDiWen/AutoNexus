@@ -22,3 +22,4 @@ config.json
 *.swp
 *.swo
 *~
+编译.bat

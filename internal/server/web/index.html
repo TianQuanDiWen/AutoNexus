@@ -653,6 +653,14 @@
         const safeArgs = escapeHtml(argsStr);
         const safeGames = escapeHtml(games);
 
+        let statusHtml = '<span style="color:#64748b;">未运行</span>';
+        if (t.last_success === true) {
+          statusHtml = '<span style="color:#4ade80; font-weight:600;">● 成功</span>';
+        } else if (t.last_success === false) {
+          const errTip = escapeHtml(t.last_error || '执行异常');
+          statusHtml = `<span style="color:#f87171; font-weight:600; cursor:help;" title="${errTip}">● 失败</span>`;
+        }
+
         card.innerHTML = `
           <div class="task-row">
             <div class="task-info">
@@ -672,14 +680,19 @@
               <span class="slider"></span>
             </label>
           </div>
-          <div class="task-row" style="margin-top:4px;">
-            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <div class="task-row" style="margin-top:6px; gap:8px; flex-wrap:wrap;">
+            <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
               <button class="btn btn-secondary btn-sm" onclick="moveTask(${index}, -1)" ${index === 0 ? 'disabled' : ''}>▲ 上移</button>
               <button class="btn btn-secondary btn-sm" onclick="moveTask(${index}, 1)" ${index === tasks.length - 1 ? 'disabled' : ''}>▼ 下移</button>
               <button class="btn btn-secondary btn-sm" onclick="editTaskByIndex(${index})">✏️ 编辑</button>
               <button class="btn btn-secondary btn-sm" style="color:#fca5a5;" onclick="deleteTaskByIndex(${index})">🗑️ 删除</button>
             </div>
-            <button class="btn btn-secondary btn-sm" onclick="runTaskByIndex(${index})">⚡ 调试</button>
+            <div style="font-size:0.75rem; color:#94a3b8; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+              <span>状态: ${statusHtml}</span>
+              <span>🕒 上次启动: <span style="color:#cbd5e1;">${escapeHtml(t.last_start_time || '未运行')}</span></span>
+              <span>⏱️ 耗时: <span style="color:#cbd5e1;">${escapeHtml(t.last_duration || '-')}</span></span>
+              <button class="btn btn-secondary btn-sm" onclick="runTaskByIndex(${index})">⚡ 调试</button>
+            </div>
           </div>
         `;
         container.appendChild(card);
@@ -813,12 +826,22 @@
       const args = parseCommandLine(argsRaw);
       const games = gamesRaw ? gamesRaw.split(',').map(s => s.trim()).filter(s => s) : [];
 
-      // 编辑模式下保留原始的启用/禁用状态，添加模式默认为 true
+      // 编辑模式下保留原始的启用/禁用状态与历史运行指标，添加模式默认为 true
       let isEnabled = true;
+      let lastStartTime = undefined;
+      let lastDuration = undefined;
+      let lastSuccess = undefined;
+      let lastError = undefined;
       if (mode === 'edit') {
         const existing = cachedTasks.find(t => t.id === id);
-        if (existing && typeof existing.enabled === 'boolean') {
-          isEnabled = existing.enabled;
+        if (existing) {
+          if (typeof existing.enabled === 'boolean') {
+            isEnabled = existing.enabled;
+          }
+          lastStartTime = existing.last_start_time;
+          lastDuration = existing.last_duration;
+          lastSuccess = existing.last_success;
+          lastError = existing.last_error;
         }
       }
 
@@ -833,6 +856,10 @@
         timeout_seconds: isNaN(timeout) ? 1800 : timeout,
         no_log_timeout_seconds: isNaN(noLog) ? 0 : noLog,
         cooldown_seconds: isNaN(cooldown) ? 5 : cooldown,
+        last_start_time: lastStartTime,
+        last_duration: lastDuration,
+        last_success: lastSuccess,
+        last_error: lastError,
       };
 
       try {

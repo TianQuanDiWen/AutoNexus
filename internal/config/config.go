@@ -21,6 +21,10 @@ type TaskConfig struct {
 	TimeoutSeconds      int      `json:"timeout_seconds"`       // 最大运行时长限制 (秒，0 为不限)
 	NoLogTimeoutSeconds int      `json:"no_log_timeout_seconds"`// 静默无日志卡死检测阈值 (秒，0 为禁用)
 	CooldownSeconds     int      `json:"cooldown_seconds"`      // 任务结束后的冷却释放时间 (秒，默认 5~10s)
+	LastStartTime       string   `json:"last_start_time,omitempty"`       // 最近一次启动时间 (如 2006-01-02 15:04:05)
+	LastDuration        string   `json:"last_duration,omitempty"`         // 最近一次运行时长 (如 12s, 641ms)
+	LastSuccess         *bool    `json:"last_success,omitempty"`          // 最近一次运行是否成功 (true=成功, false=失败)
+	LastError           string   `json:"last_error,omitempty"`            // 若失败记录具体错误原因
 }
 
 // Config 全局服务配置
@@ -173,6 +177,18 @@ func (m *Manager) UpdateTask(task *TaskConfig) error {
 	found := false
 	for i, t := range m.cfg.Tasks {
 		if t.ID == task.ID {
+			if task.LastStartTime == "" {
+				task.LastStartTime = t.LastStartTime
+			}
+			if task.LastDuration == "" {
+				task.LastDuration = t.LastDuration
+			}
+			if task.LastSuccess == nil {
+				task.LastSuccess = t.LastSuccess
+			}
+			if task.LastError == "" {
+				task.LastError = t.LastError
+			}
 			m.cfg.Tasks[i] = task
 			found = true
 			break
@@ -180,6 +196,23 @@ func (m *Manager) UpdateTask(task *TaskConfig) error {
 	}
 	if !found {
 		return fmt.Errorf("未找到任务 ID '%s'", task.ID)
+	}
+	return m.saveLocked()
+}
+
+// UpdateTaskRunStats 更新任务的最近启动时间、运行时长与执行结果并落盘持久化
+func (m *Manager) UpdateTaskRunStats(taskID string, startTime string, duration string, success bool, errorMsg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, t := range m.cfg.Tasks {
+		if t.ID == taskID {
+			t.LastStartTime = startTime
+			t.LastDuration = duration
+			t.LastSuccess = &success
+			t.LastError = errorMsg
+			break
+		}
 	}
 	return m.saveLocked()
 }

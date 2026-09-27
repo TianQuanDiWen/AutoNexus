@@ -256,17 +256,29 @@ func (e *Engine) runQueueLoop(ctx context.Context) {
 }
 
 func (e *Engine) executeOneTask(ctx context.Context, task *config.TaskConfig, idx, total int) *executor.TaskResult {
+	startTime := time.Now()
+
 	e.mu.Lock()
 	e.state = StateRunning
 	e.currentTaskID = task.ID
 	e.currentTaskName = task.Name
 	e.currentTaskIndex = idx + 1
-	e.taskStartTime = time.Now()
+	e.taskStartTime = startTime
 	e.mu.Unlock()
 
 	e.broadcaster.EmitSystemLog("SCHEDULER", fmt.Sprintf("[%d/%d] 开始执行: %s", idx+1, total, task.Name))
 
 	res := e.runner.Run(ctx, task)
+
+	// 记录并落盘最近一次启动时间与运行时长
+	startTimeStr := startTime.Format("2006-01-02 15:04:05")
+	var durationStr string
+	if res.Duration < time.Second {
+		durationStr = res.Duration.Round(time.Millisecond).String()
+	} else {
+		durationStr = res.Duration.Round(time.Second).String()
+	}
+	_ = e.configMgr.UpdateTaskRunStats(task.ID, startTimeStr, durationStr, res.Success, res.ErrorMsg)
 
 	e.mu.Lock()
 	e.lastResults = append(e.lastResults, res)
