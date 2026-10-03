@@ -3,7 +3,6 @@
 package procjob
 
 import (
-	"fmt"
 	"os"
 	"sync"
 	"syscall"
