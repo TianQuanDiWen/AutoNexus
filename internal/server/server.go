@@ -48,6 +48,8 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("GET /api/v1/status", s.handleGetStatus)
 	s.mux.HandleFunc("POST /api/v1/queue/start", s.handleStartQueue)
 	s.mux.HandleFunc("POST /api/v1/queue/stop", s.handleStopQueue)
+	s.mux.HandleFunc("POST /api/v1/queue/skip-wait", s.handleSkipWait)
+	s.mux.HandleFunc("POST /api/v1/schedule", s.handleUpdateSchedule)
 	s.mux.HandleFunc("POST /api/v1/tasks", s.handleCreateTask)
 	s.mux.HandleFunc("PUT /api/v1/tasks/{id}", s.handleUpdateTask)
 	s.mux.HandleFunc("DELETE /api/v1/tasks/{id}", s.handleDeleteTask)
@@ -84,7 +86,17 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStartQueue(w http.ResponseWriter, r *http.Request) {
-	if err := s.engine.StartQueue(); err != nil {
+	force := r.URL.Query().Get("force") == "true"
+	if r.Header.Get("Content-Type") == "application/json" {
+		var req struct {
+			Force bool `json:"force"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.Force {
+			force = true
+		}
+	}
+
+	if err := s.engine.StartQueue(force); err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -97,6 +109,32 @@ func (s *Server) handleStopQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]string{"message": "急停指令已发送"})
+}
+
+func (s *Server) handleSkipWait(w http.ResponseWriter, r *http.Request) {
+	if err := s.engine.SkipScheduleWait(); err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]string{"message": "已跳过刷新等待，立即开跑"})
+}
+
+func (s *Server) handleUpdateSchedule(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ScheduleEnabled bool   `json:"schedule_enabled"`
+		ScheduleTime    string `json:"schedule_time"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "解析请求参数失败")
+		return
+	}
+
+	if err := s.configMgr.UpdateSchedule(req.ScheduleEnabled, req.ScheduleTime); err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.engine.NotifyScheduleChanged()
+	s.writeJSON(w, http.StatusOK, map[string]string{"message": "定时调度配置已更新"})
 }
 
 func (s *Server) handleRunTask(w http.ResponseWriter, r *http.Request) {

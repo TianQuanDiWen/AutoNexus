@@ -11,35 +11,41 @@ import (
 
 // TaskConfig 自动化单项任务配置
 type TaskConfig struct {
-	ID                  string   `json:"id"`                    // 任务唯一标识符
-	Name                string   `json:"name"`                  // 任务友好名称
-	Enabled             bool     `json:"enabled"`               // 是否参与队列轮转调度
-	Executable          string   `json:"executable"`            // 执行程序路径 (如 madoaxvv-agent.exe)
-	Args                []string `json:"args"`                  // 启动命令行参数
-	WorkingDir          string   `json:"working_dir"`           // 工作目录 (留空则使用可执行文件所在目录)
-	GameProcessNames    []string `json:"game_process_names"`    // 关联游戏进程名，用于任务结束后的残留清理
-	TimeoutSeconds      int      `json:"timeout_seconds"`       // 最大运行时长限制 (秒，0 为不限)
-	NoLogTimeoutSeconds int      `json:"no_log_timeout_seconds"`// 静默无日志卡死检测阈值 (秒，0 为禁用)
-	CooldownSeconds     int      `json:"cooldown_seconds"`      // 任务结束后的冷却释放时间 (秒，默认 5~10s)
-	LastStartTime       string   `json:"last_start_time,omitempty"`       // 最近一次启动时间 (如 2006-01-02 15:04:05)
-	LastDuration        string   `json:"last_duration,omitempty"`         // 最近一次运行时长 (如 12s, 641ms)
-	LastSuccess         *bool    `json:"last_success,omitempty"`          // 最近一次运行是否成功 (true=成功, false=失败)
-	LastError           string   `json:"last_error,omitempty"`            // 若失败记录具体错误原因
+	ID                  string   `json:"id"`                             // 任务唯一标识符
+	Name                string   `json:"name"`                           // 任务友好名称
+	Enabled             bool     `json:"enabled"`                        // 是否参与队列轮转调度
+	Executable          string   `json:"executable"`                     // 执行程序路径 (如 madoaxvv-agent.exe)
+	Args                []string `json:"args"`                           // 启动命令行参数
+	WorkingDir          string   `json:"working_dir"`                    // 工作目录 (留空则使用可执行文件所在目录)
+	GameProcessNames    []string `json:"game_process_names"`             // 关联游戏进程名，用于任务结束后的残留清理
+	TimeoutSeconds      int      `json:"timeout_seconds"`                // 最大运行时长限制 (秒，0 为不限)
+	NoLogTimeoutSeconds int      `json:"no_log_timeout_seconds"`         // 静默无日志卡死检测阈值 (秒，0 为禁用)
+	CooldownSeconds     int      `json:"cooldown_seconds"`               // 任务结束后的冷却释放时间 (秒，默认 5~10s)
+	RefreshTime         string   `json:"refresh_time,omitempty"`         // 每日日常刷新时间 (如 "04:00"，留空不限制)
+	LastStartTime       string   `json:"last_start_time,omitempty"`      // 最近一次启动时间 (如 2006-01-02 15:04:05)
+	LastDuration        string   `json:"last_duration,omitempty"`        // 最近一次运行时长 (如 12s, 641ms)
+	LastSuccess         *bool    `json:"last_success,omitempty"`         // 最近一次运行是否成功 (true=成功, false=失败)
+	LastError           string   `json:"last_error,omitempty"`           // 若失败记录具体错误原因
+	IsCompletedToday    bool     `json:"is_completed_today,omitempty"`   // 动态状态：在当前日常周期内是否已成功执行
 }
 
 // Config 全局服务配置
 type Config struct {
-	Host  string        `json:"host"`  // 监听地址，默认 0.0.0.0 供局域网访问
-	Port  int           `json:"port"`  // 监听端口，默认 18080
-	Tasks []*TaskConfig `json:"tasks"` // 任务列表（按调度顺序排列）
+	Host            string        `json:"host"`             // 监听地址，默认 0.0.0.0 供局域网访问
+	Port            int           `json:"port"`             // 监听端口，默认 18080
+	ScheduleEnabled bool          `json:"schedule_enabled"` // 是否开启每日自动定时调度
+	ScheduleTime    string        `json:"schedule_time"`    // 每日自动调度启动时间 (如 "04:05")
+	Tasks           []*TaskConfig `json:"tasks"`            // 任务列表（按调度顺序排列）
 }
 
 // DefaultConfig 生成开箱即用的默认配置模版（黑盒任务由用户通过 Web 控制台灵活添加）
 func DefaultConfig() *Config {
 	return &Config{
-		Host:  "0.0.0.0",
-		Port:  18080,
-		Tasks: []*TaskConfig{},
+		Host:            "0.0.0.0",
+		Port:            18080,
+		ScheduleEnabled: false,
+		ScheduleTime:    "04:05",
+		Tasks:           []*TaskConfig{},
 	}
 }
 
@@ -86,6 +92,14 @@ func (m *Manager) loadOrCreate() error {
 	if cfg.Host == "" {
 		cfg.Host = "0.0.0.0"
 	}
+	if cfg.ScheduleTime == "" {
+		cfg.ScheduleTime = "04:05"
+	}
+	for _, t := range cfg.Tasks {
+		if t.RefreshTime == "" {
+			t.RefreshTime = "04:00"
+		}
+	}
 	m.cfg = &cfg
 	return nil
 }
@@ -103,9 +117,11 @@ func (m *Manager) Get() Config {
 	}
 
 	return Config{
-		Host:  m.cfg.Host,
-		Port:  m.cfg.Port,
-		Tasks: tasksCopy,
+		Host:            m.cfg.Host,
+		Port:            m.cfg.Port,
+		ScheduleEnabled: m.cfg.ScheduleEnabled,
+		ScheduleTime:    m.cfg.ScheduleTime,
+		Tasks:           tasksCopy,
 	}
 }
 
@@ -115,6 +131,18 @@ func (m *Manager) UpdateTasks(tasks []*TaskConfig) error {
 	defer m.mu.Unlock()
 
 	m.cfg.Tasks = tasks
+	return m.saveLocked()
+}
+
+// UpdateSchedule 更新每日自动定时调度配置并落盘
+func (m *Manager) UpdateSchedule(enabled bool, scheduleTime string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.cfg.ScheduleEnabled = enabled
+	if scheduleTime != "" {
+		m.cfg.ScheduleTime = scheduleTime
+	}
 	return m.saveLocked()
 }
 
@@ -151,6 +179,9 @@ func (m *Manager) AddTask(task *TaskConfig) error {
 	if task.Executable == "" {
 		return fmt.Errorf("可执行文件路径不能为空")
 	}
+	if task.RefreshTime == "" {
+		task.RefreshTime = "04:00"
+	}
 
 	for _, t := range m.cfg.Tasks {
 		if t.ID == task.ID {
@@ -177,6 +208,9 @@ func (m *Manager) UpdateTask(task *TaskConfig) error {
 	found := false
 	for i, t := range m.cfg.Tasks {
 		if t.ID == task.ID {
+			if task.RefreshTime == "" {
+				task.RefreshTime = t.RefreshTime
+			}
 			if task.LastStartTime == "" {
 				task.LastStartTime = t.LastStartTime
 			}
@@ -251,4 +285,55 @@ func (m *Manager) saveLocked() error {
 		return err
 	}
 	return os.WriteFile(m.filePath, data, 0644)
+}
+
+// ParseHourMinute 解析 "HH:MM" 格式，若不符合格式返回默认时分
+func ParseHourMinute(s string, defaultHour, defaultMin int) (int, int) {
+	if len(s) == 5 && s[2] == ':' {
+		var h, m int
+		if _, err := fmt.Sscanf(s, "%02d:%02d", &h, &m); err == nil {
+			if h >= 0 && h < 24 && m >= 0 && m < 60 {
+				return h, m
+			}
+		}
+	}
+	return defaultHour, defaultMin
+}
+
+// GetCycleStartTime 计算指定刷新时间在当前时刻下的日常周期起始时间
+func GetCycleStartTime(refreshTimeStr string, now time.Time) time.Time {
+	h, m := ParseHourMinute(refreshTimeStr, 4, 0)
+	todayRefresh := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location())
+	if now.Before(todayRefresh) {
+		// 尚未到达今天的刷新时间，属于昨日日常周期
+		return todayRefresh.AddDate(0, 0, -1)
+	}
+	// 已到达或超过今天的刷新时间，属于今日日常周期
+	return todayRefresh
+}
+
+// IsTaskCompletedInCurrentCycle 判断任务在当前日常周期内是否已成功执行完成
+func IsTaskCompletedInCurrentCycle(task *TaskConfig, now time.Time) bool {
+	if task == nil || task.LastSuccess == nil || !*task.LastSuccess || task.LastStartTime == "" {
+		return false
+	}
+	lastStart, err := time.ParseInLocation("2006-01-02 15:04:05", task.LastStartTime, now.Location())
+	if err != nil {
+		return false
+	}
+	cycleStart := GetCycleStartTime(task.RefreshTime, now)
+	return !lastStart.Before(cycleStart)
+}
+
+// GetWaitDurationUntilRefresh 计算距任务下一次日常刷新还需等待的时间 (未到刷新时间返回 > 0，已过刷新时间返回 0)
+func GetWaitDurationUntilRefresh(refreshTimeStr string, now time.Time) time.Duration {
+	if refreshTimeStr == "" {
+		return 0
+	}
+	h, m := ParseHourMinute(refreshTimeStr, 4, 0)
+	todayRefresh := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location())
+	if now.Before(todayRefresh) {
+		return todayRefresh.Sub(now)
+	}
+	return 0
 }

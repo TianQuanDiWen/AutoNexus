@@ -197,3 +197,28 @@ func TestServerBrowseFS(t *testing.T) {
 	}
 }
 
+func TestServerScheduleAPI(t *testing.T) {
+	srv, cfgMgr, _ := setupTestServer(t)
+
+	// 测试更新定时调度配置 (POST /api/v1/schedule)
+	schedBody := map[string]any{
+		"schedule_enabled": true,
+		"schedule_time":    "04:30",
+	}
+	bodyBytes, _ := json.Marshal(schedBody)
+	req := httptest.NewRequest("POST", "/api/v1/schedule", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK on schedule update, got %d", rec.Code)
+	}
+
+	cfg := cfgMgr.Get()
+	if !cfg.ScheduleEnabled || cfg.ScheduleTime != "04:30" {
+		t.Fatalf("Schedule config not updated properly: %+v", cfg)
+	}
+}
+
+

@@ -82,7 +82,7 @@
     .badge-COOLING { background: #78350f; color: #fde68a; }
     .badge-STOPPING { background: #7f1d1d; color: #fca5a5; }
     .badge-PREPARE { background: #312e81; color: #c7d2fe; }
-
+    .badge-WAITING_SCHEDULE { background: #4c1d95; color: #ddd6fe; animation: pulse 2s infinite; }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.7; }
@@ -152,6 +152,7 @@
       transition: border-color 0.2s;
     }
     .task-card.active { border-color: var(--primary); box-shadow: 0 0 12px rgba(59, 130, 246, 0.25); }
+    .task-card.completed { border-left: 4px solid #22c55e; background: linear-gradient(90deg, rgba(34, 197, 94, 0.08) 0%, var(--card-bg) 35%); }
     .task-card.disabled { opacity: 0.55; }
     .task-row { display: flex; justify-content: space-between; align-items: center; }
     .task-info { flex: 1; min-width: 0; }
@@ -310,6 +311,13 @@
           <span style="font-size:0.75rem; color:#fde68a;">系统冷却倒计时</span>
           <div id="cooldownSec" style="font-size:1.3rem; font-weight:700; color:#fbbf24;">0s</div>
         </div>
+        <div id="waitScheduleBox" style="display:none; text-align:right;">
+          <span style="font-size:0.75rem; color:#fde68a;">等待日常刷新 (<span id="waitTargetTime">04:00</span>)</span>
+          <div style="display:flex; align-items:center; gap:8px; justify-content:flex-end; margin-top:2px;">
+            <div id="waitScheduleSec" style="font-size:1.2rem; font-weight:700; color:#fbbf24;">0s</div>
+            <button class="btn btn-secondary btn-sm" style="padding:2px 8px; font-size:0.75rem;" onclick="skipWait()">⚡ 跳过</button>
+          </div>
+        </div>
       </div>
 
       <div class="status-body">
@@ -335,6 +343,23 @@
         <button id="btnStop" class="btn btn-danger" onclick="stopQueue()">
           <span>⏹ 急停 (Kill)</span>
         </button>
+      </div>
+
+      <!-- 运行模式与每日自动调度 -->
+      <div style="margin-top:14px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.08); display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; font-size:0.85rem;">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--text-muted); user-select:none;">
+          <input type="checkbox" id="chkForceRun">
+          <span>强制全跑 (忽略今日日常完成状态)</span>
+        </label>
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="color:var(--text-muted);">⏰ 每日自动调度:</span>
+          <label class="switch" style="width:36px; height:20px;">
+            <input type="checkbox" id="chkAutoSchedule" onchange="updateScheduleConfig()">
+            <span class="slider" style="border-radius:20px;"></span>
+          </label>
+          <input type="time" id="inpScheduleTime" class="form-input" style="padding:3px 8px; font-size:0.8rem; width:88px; text-align:center;" value="04:05" onchange="updateScheduleConfig()">
+          <span id="nextScheduleTip" style="font-size:0.75rem; color:#94a3b8;"></span>
+        </div>
       </div>
     </div>
 
@@ -425,9 +450,15 @@
         </div>
       </div>
 
-      <div class="form-group">
-        <label class="form-label">任务完成冷却时间 (秒)</label>
-        <input type="number" id="taskCooldownInput" class="form-input" value="8">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">任务完成冷却时间 (秒)</label>
+          <input type="number" id="taskCooldownInput" class="form-input" value="8">
+        </div>
+        <div class="form-group">
+          <label class="form-label">每日日常刷新时刻 (HH:MM)</label>
+          <input type="time" id="taskRefreshInput" class="form-input" value="04:00">
+        </div>
       </div>
 
       <div class="modal-footer">
@@ -570,6 +601,44 @@
         cdBox.style.display = 'none';
       }
 
+      // 等待日常刷新展示
+      const waitBox = document.getElementById('waitScheduleBox');
+      if (waitBox) {
+        if (data.state === 'WAITING_SCHEDULE' && data.schedule_wait_remaining > 0) {
+          waitBox.style.display = 'block';
+          document.getElementById('waitTargetTime').innerText = data.schedule_wait_target || '04:00';
+          const remSec = data.schedule_wait_remaining;
+          const h = Math.floor(remSec / 3600);
+          const m = Math.floor((remSec % 3600) / 60);
+          const s = remSec % 60;
+          let timeText = `${remSec}s`;
+          if (h > 0) {
+            timeText = `${h}h ${m}m ${s}s`;
+          } else if (m > 0) {
+            timeText = `${m}m ${s}s`;
+          }
+          document.getElementById('waitScheduleSec').innerText = timeText;
+        } else {
+          waitBox.style.display = 'none';
+        }
+      }
+
+      // 每日自动调度配置联动更新 (用户未在聚焦输入时)
+      const inpTime = document.getElementById('inpScheduleTime');
+      const chkSched = document.getElementById('chkAutoSchedule');
+      if (chkSched && inpTime && document.activeElement !== inpTime) {
+        chkSched.checked = !!data.schedule_enabled;
+        if (data.schedule_time) inpTime.value = data.schedule_time;
+      }
+      const tip = document.getElementById('nextScheduleTip');
+      if (tip) {
+        if (data.schedule_enabled) {
+          tip.innerText = `下次: ${data.schedule_next_run || '-'}`;
+        } else {
+          tip.innerText = '未启用';
+        }
+      }
+
       const tasksStr = JSON.stringify(data.tasks);
       if (tasksStr !== JSON.stringify(cachedTasks)) {
         cachedTasks = data.tasks || [];
@@ -641,8 +710,14 @@
       }
 
       tasks.forEach((t, index) => {
+        const isCompleted = !!t.is_completed_today;
+        let cardClass = 'task-card';
+        if (t.id === currentTaskID) cardClass += ' active';
+        if (!t.enabled) cardClass += ' disabled';
+        if (isCompleted) cardClass += ' completed';
+
         const card = document.createElement('div');
-        card.className = `task-card ${t.id === currentTaskID ? 'active' : ''} ${!t.enabled ? 'disabled' : ''}`;
+        card.className = cardClass;
         card.setAttribute('data-task-id', t.id);
 
         const games = (t.game_process_names && t.game_process_names.length) ? t.game_process_names.join(', ') : '无';
@@ -654,11 +729,13 @@
         const safeGames = escapeHtml(games);
 
         let statusHtml = '<span style="color:#64748b;">未运行</span>';
-        if (t.last_success === true) {
-          statusHtml = '<span style="color:#4ade80; font-weight:600;">● 成功</span>';
+        if (isCompleted) {
+          statusHtml = '<span style="color:#22c55e; font-weight:700; background:rgba(34,197,94,0.15); padding:2px 8px; border-radius:6px;">🟢 今日已完成</span>';
         } else if (t.last_success === false) {
           const errTip = escapeHtml(t.last_error || '执行异常');
-          statusHtml = `<span style="color:#f87171; font-weight:600; cursor:help;" title="${errTip}">● 失败</span>`;
+          statusHtml = `<span style="color:#ef4444; font-weight:700; background:rgba(239,68,68,0.15); padding:2px 8px; border-radius:6px; cursor:help;" title="${errTip}">🔴 报错待重试</span>`;
+        } else {
+          statusHtml = '<span style="color:#94a3b8; font-weight:600; background:rgba(148,163,184,0.1); padding:2px 8px; border-radius:6px;">○ 今日待执行</span>';
         }
 
         card.innerHTML = `
@@ -672,7 +749,8 @@
                 <span class="meta-tag">超时: ${t.timeout_seconds ? t.timeout_seconds + 's' : '不限'}</span>
                 <span class="meta-tag">假死检测: ${t.no_log_timeout_seconds ? t.no_log_timeout_seconds + 's' : '关'}</span>
                 <span class="meta-tag">冷却: ${(t.cooldown_seconds ?? 5)}s</span>
-                <span class="meta-tag">进程清理: ${safeGames}</span>
+                <span class="meta-tag">刷新: ${escapeHtml(t.refresh_time || '04:00')}</span>
+                <span class="meta-tag">清理: ${safeGames}</span>
               </div>
             </div>
             <label class="switch" style="margin-left:10px;">
@@ -691,7 +769,7 @@
               <span>状态: ${statusHtml}</span>
               <span>🕒 上次启动: <span style="color:#cbd5e1;">${escapeHtml(t.last_start_time || '未运行')}</span></span>
               <span>⏱️ 耗时: <span style="color:#cbd5e1;">${escapeHtml(t.last_duration || '-')}</span></span>
-              <button class="btn btn-secondary btn-sm" onclick="runTaskByIndex(${index})">⚡ 调试</button>
+              <button class="btn btn-secondary btn-sm" onclick="runTaskByIndex(${index})">⚡ 运行</button>
             </div>
           </div>
         `;
@@ -719,6 +797,7 @@
         document.getElementById('taskTimeoutInput').value = task.timeout_seconds ?? 1800;
         document.getElementById('taskNoLogInput').value = task.no_log_timeout_seconds ?? 0;
         document.getElementById('taskCooldownInput').value = task.cooldown_seconds ?? 5;
+        document.getElementById('taskRefreshInput').value = task.refresh_time || '04:00';
       } else {
         title.innerText = '添加黑盒任务';
         mode.value = 'create';
@@ -732,6 +811,7 @@
         document.getElementById('taskTimeoutInput').value = 1800;
         document.getElementById('taskNoLogInput').value = 0;
         document.getElementById('taskCooldownInput').value = 5;
+        document.getElementById('taskRefreshInput').value = '04:00';
       }
 
       modal.style.display = 'flex';
@@ -812,6 +892,7 @@
       const rawTimeout = document.getElementById('taskTimeoutInput').value.trim();
       const rawNoLog = document.getElementById('taskNoLogInput').value.trim();
       const rawCooldown = document.getElementById('taskCooldownInput').value.trim();
+      const refreshTime = (document.getElementById('taskRefreshInput').value || '04:00').trim();
 
       const timeout = rawTimeout === '' ? 1800 : parseInt(rawTimeout);
       const noLog = rawNoLog === '' ? 0 : parseInt(rawNoLog);
@@ -856,6 +937,7 @@
         timeout_seconds: isNaN(timeout) ? 1800 : timeout,
         no_log_timeout_seconds: isNaN(noLog) ? 0 : noLog,
         cooldown_seconds: isNaN(cooldown) ? 5 : cooldown,
+        refresh_time: refreshTime || '04:00',
         last_start_time: lastStartTime,
         last_duration: lastDuration,
         last_success: lastSuccess,
@@ -1025,8 +1107,29 @@
 
     // 控制动作
     async function startQueue() {
-      await fetch('/api/v1/queue/start', { method: 'POST' });
+      const force = document.getElementById('chkForceRun')?.checked ? 'true' : 'false';
+      await fetch(`/api/v1/queue/start?force=${force}`, { method: 'POST' });
       fetchStatus();
+    }
+
+    async function skipWait() {
+      await fetch('/api/v1/queue/skip-wait', { method: 'POST' });
+      fetchStatus();
+    }
+
+    async function updateScheduleConfig() {
+      const enabled = document.getElementById('chkAutoSchedule')?.checked || false;
+      const timeVal = document.getElementById('inpScheduleTime')?.value || '04:05';
+      try {
+        await fetch('/api/v1/schedule', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ schedule_enabled: enabled, schedule_time: timeVal })
+        });
+        fetchStatus();
+      } catch (e) {
+        console.error('更新定时配置失败:', e);
+      }
     }
 
     async function stopQueue() {

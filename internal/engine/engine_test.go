@@ -63,7 +63,7 @@ func TestEngineQueueFlow(t *testing.T) {
 		t.Fatalf("Expected initial state IDLE, got %s", status.State)
 	}
 
-	if err := eng.StartQueue(); err != nil {
+	if err := eng.StartQueue(false); err != nil {
 		t.Fatalf("StartQueue failed: %v", err)
 	}
 
@@ -88,5 +88,20 @@ func TestEngineQueueFlow(t *testing.T) {
 		t.Fatalf("Expected all tasks to succeed, got results: %+v", status.LastResults)
 	}
 	t.Logf("Engine queue finished successfully with 2 tasks")
+
+	// 再次启动队列 (非强制模式)，此时所有任务今日已完成，应立即跳过全部任务直接返回 IDLE
+	if err := eng.StartQueue(false); err != nil {
+		t.Fatalf("Second StartQueue(false) failed: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	status = eng.GetStatus()
+	if status.State != StateIdle {
+		t.Fatalf("Expected IDLE after skipping completed tasks, got %s", status.State)
+	}
+	if len(status.LastResults) != 0 {
+		t.Fatalf("Expected 0 executed task results on skipped run, got %d", len(status.LastResults))
+	}
+	t.Logf("Engine successfully skipped all completed tasks in routine mode")
+
 	_ = os.Remove(cfgPath)
 }
