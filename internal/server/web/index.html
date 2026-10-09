@@ -500,11 +500,43 @@
     </div>
   </div>
 
+  <!-- 单任务专属执行日志回看模态窗 (Task Log Modal) -->
+  <div id="taskLogModal" class="modal-overlay" style="z-index:105;" onclick="if(event.target===this) closeTaskLogModal()">
+    <div class="modal-card" style="max-width: 820px; width: 95%; max-height: 85vh; display:flex; flex-direction:column;">
+      <div class="modal-title" style="margin-bottom:12px; display:flex; justify-content:space-between; align-items:center;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span>📜</span>
+          <span id="taskLogModalTitle" style="font-weight:700;">任务日志回看</span>
+          <span id="taskLogLineCount" style="font-size:0.75rem; color:var(--text-muted); font-weight:normal;"></span>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button class="btn btn-secondary btn-sm" onclick="copyTaskLogs()" id="btnCopyTaskLog" title="复制全部日志内容">📋 复制</button>
+          <button class="btn btn-secondary btn-sm" onclick="reloadTaskLogs()" title="重新加载日志">🔄 刷新</button>
+          <button class="btn btn-secondary btn-sm" onclick="toggleTaskLogAutoScroll()" id="btnTaskLogAutoScroll">滚屏: 开</button>
+          <span style="cursor:pointer; color:var(--text-muted); font-size:1.1rem; margin-left:6px;" onclick="closeTaskLogModal()">✕</span>
+        </div>
+      </div>
+
+      <!-- 单任务独立控制台终端容器 -->
+      <div id="taskLogTerminal" class="terminal-body" style="flex:1; height:420px; min-height:280px; overflow-y:auto; border:1px solid #334155; border-radius:8px; padding:10px; background:#0b1120; font-family:monospace; font-size:0.82rem;">
+        <!-- 动态渲染单任务日志行 -->
+      </div>
+
+      <div class="modal-footer" style="margin-top:12px; justify-content:space-between; align-items:center;">
+        <span style="font-size:0.75rem; color:var(--text-muted);">独立保存该任务最近一次运行的全部日志，不受全局滚屏截断影响</span>
+        <button class="btn btn-secondary btn-sm" onclick="closeTaskLogModal()">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     let autoScroll = true;
     let ws = null;
     let cachedTasks = [];
     let currentTaskID = "";
+    let currentLogTaskID = "";
+    let taskLogAutoScroll = true;
+    let taskLogRawText = "";
 
     function toggleAutoScroll() {
       autoScroll = !autoScroll;
@@ -539,6 +571,25 @@
       }
     }
 
+    function appendSingleTaskLog(entry) {
+      const container = document.getElementById('taskLogTerminal');
+      if (!container) return;
+      if (container.querySelector('.empty-hint')) {
+        container.innerHTML = '';
+      }
+      const row = document.createElement('div');
+      row.className = `log-line stream-${entry.stream || 'stdout'}`;
+      const timeSpan = `<span class="log-time">${escapeHtml(entry.timestamp || '')}</span>`;
+      const safeMsg = escapeHtml(entry.message || '');
+      row.innerHTML = `${timeSpan}${safeMsg}`;
+      container.appendChild(row);
+      taskLogRawText += (taskLogRawText ? '\n' : '') + `[${entry.timestamp || ''}] [${entry.stream || 'stdout'}] ${entry.message || ''}`;
+
+      if (taskLogAutoScroll) {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+
     // WebSocket 保持与重连
     function connectWS() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -558,6 +609,9 @@
             data.history.forEach(appendLog);
           } else {
             appendLog(data);
+            if (currentLogTaskID && data.task_id === currentLogTaskID) {
+              appendSingleTaskLog(data);
+            }
           }
         } catch (e) {}
       };
@@ -770,6 +824,7 @@
               <span>🕒 上次启动: <span style="color:#cbd5e1;">${escapeHtml(t.last_start_time || '未运行')}</span></span>
               <span>⏱️ 耗时: <span style="color:#cbd5e1;">${escapeHtml(t.last_duration || '-')}</span></span>
               <button class="btn btn-secondary btn-sm" onclick="runTaskByIndex(${index})">⚡ 运行</button>
+              <button class="btn btn-secondary btn-sm" onclick="openTaskLogModal('${escapeHtml(t.id)}')">📜 日志</button>
             </div>
           </div>
         `;
@@ -777,7 +832,83 @@
       });
     }
 
-    // 模态弹窗控制
+    // 单任务独立日志模态控制
+    async function openTaskLogModal(taskID) {
+      currentLogTaskID = taskID;
+      const modal = document.getElementById('taskLogModal');
+      modal.style.display = 'flex';
+      const task = cachedTasks.find(t => t.id === taskID);
+      const taskName = task ? (task.name || task.id) : taskID;
+      document.getElementById('taskLogModalTitle').innerText = `${taskName} - 独立日志`;
+      await reloadTaskLogs();
+    }
+
+    function closeTaskLogModal() {
+      currentLogTaskID = "";
+      document.getElementById('taskLogModal').style.display = 'none';
+    }
+
+    async function reloadTaskLogs() {
+      if (!currentLogTaskID) return;
+      const container = document.getElementById('taskLogTerminal');
+      container.innerHTML = '<div style="color:var(--text-muted); padding:10px;">正在加载日志...</div>';
+      try {
+        const res = await fetch(`/api/v1/tasks/${encodeURIComponent(currentLogTaskID)}/logs`);
+        if (!res.ok) {
+          container.innerHTML = `<div style="color:#f87171; padding:10px;">获取日志失败: ${res.statusText}</div>`;
+          return;
+        }
+        const data = await res.json();
+        const logs = data.logs || [];
+        document.getElementById('taskLogLineCount').innerText = `(共 ${logs.length} 行)`;
+
+        if (logs.length === 0) {
+          container.innerHTML = `<div class="empty-hint" style="padding:40px 10px;">⚡ 暂无该任务的独立执行日志，运行后将在此完整记录</div>`;
+          taskLogRawText = "";
+          return;
+        }
+
+        let html = '';
+        let rawLines = [];
+        logs.forEach(entry => {
+          const timeSpan = `<span class="log-time">${escapeHtml(entry.timestamp || '')}</span>`;
+          const safeMsg = escapeHtml(entry.message || '');
+          html += `<div class="log-line stream-${entry.stream || 'stdout'}">${timeSpan}${safeMsg}</div>`;
+          rawLines.push(`[${entry.timestamp || ''}] [${entry.stream || 'stdout'}] ${entry.message || ''}`);
+        });
+        container.innerHTML = html;
+        taskLogRawText = rawLines.join('\n');
+
+        if (taskLogAutoScroll) {
+          container.scrollTop = container.scrollHeight;
+        }
+      } catch (e) {
+        container.innerHTML = `<div style="color:#f87171; padding:10px;">网络错误: ${e}</div>`;
+      }
+    }
+
+    async function copyTaskLogs() {
+      if (!taskLogRawText) {
+        alert('暂无日志可复制');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(taskLogRawText);
+        const btn = document.getElementById('btnCopyTaskLog');
+        const oldText = btn.innerText;
+        btn.innerText = '✅ 已复制';
+        setTimeout(() => { btn.innerText = oldText; }, 1500);
+      } catch (e) {
+        alert('复制到剪贴板失败: ' + e);
+      }
+    }
+
+    function toggleTaskLogAutoScroll() {
+      taskLogAutoScroll = !taskLogAutoScroll;
+      document.getElementById('btnTaskLogAutoScroll').innerText = `滚屏: ${taskLogAutoScroll ? '开' : '关'}`;
+    }
+
+    // 任务配置编辑模态弹窗控制
     function openTaskModal(task = null) {
       const modal = document.getElementById('taskModal');
       const title = document.getElementById('modalTitle');

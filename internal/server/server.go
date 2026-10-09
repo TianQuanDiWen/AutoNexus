@@ -53,6 +53,7 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("POST /api/v1/tasks", s.handleCreateTask)
 	s.mux.HandleFunc("PUT /api/v1/tasks/{id}", s.handleUpdateTask)
 	s.mux.HandleFunc("DELETE /api/v1/tasks/{id}", s.handleDeleteTask)
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}/logs", s.handleGetTaskLogs)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/run", s.handleRunTask)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/toggle", s.handleToggleTask)
 	s.mux.HandleFunc("POST /api/v1/tasks/reorder", s.handleReorderTasks)
@@ -280,6 +281,34 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]string{"message": "任务已删除"})
+}
+
+func (s *Server) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("id")
+	if taskID == "" {
+		s.writeError(w, http.StatusBadRequest, "缺少 task id")
+		return
+	}
+
+	cfg := s.configMgr.Get()
+	var taskName string
+	for _, t := range cfg.Tasks {
+		if t.ID == taskID {
+			taskName = t.Name
+			break
+		}
+	}
+	if taskName == "" {
+		taskName = taskID
+	}
+
+	logs := s.broadcaster.GetTaskHistory(taskID)
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"task_id":   taskID,
+		"task_name": taskName,
+		"total":     len(logs),
+		"logs":      logs,
+	})
 }
 
 // FSItem 文件系统项目（目录或文件）

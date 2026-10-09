@@ -221,4 +221,64 @@ func TestServerScheduleAPI(t *testing.T) {
 	}
 }
 
+func TestServerTaskLogsAPI(t *testing.T) {
+	srv, cfgMgr, _ := setupTestServer(t)
+
+	// 创建一个测试任务
+	task := &config.TaskConfig{
+		ID:         "task_log_test",
+		Name:       "日志测试任务",
+		Executable: "cmd.exe",
+		Enabled:    true,
+	}
+	if err := cfgMgr.AddTask(task); err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	// 模拟写入该任务的日志
+	srv.broadcaster.StartTaskSession(task.ID)
+	srv.broadcaster.Broadcast(executor.LogEntry{
+		Timestamp: "10:00:00.000",
+		TaskID:    task.ID,
+		Stream:    "stdout",
+		Message:   "任务启动并输出日志行 1",
+	})
+	srv.broadcaster.Broadcast(executor.LogEntry{
+		Timestamp: "10:00:01.000",
+		TaskID:    task.ID,
+		Stream:    "stderr",
+		Message:   "警告信息",
+	})
+	srv.broadcaster.EndTaskSession(task.ID)
+
+	// 发送 GET /api/v1/tasks/task_log_test/logs
+	req := httptest.NewRequest("GET", "/api/v1/tasks/task_log_test/logs", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		TaskID   string              `json:"task_id"`
+		TaskName string              `json:"task_name"`
+		Total    int                 `json:"total"`
+		Logs     []executor.LogEntry `json:"logs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if resp.TaskID != "task_log_test" || resp.TaskName != "日志测试任务" {
+		t.Fatalf("Unexpected task info: %+v", resp)
+	}
+	if resp.Total != 2 || len(resp.Logs) != 2 {
+		t.Fatalf("Expected 2 logs, got %d", resp.Total)
+	}
+	if resp.Logs[0].Message != "任务启动并输出日志行 1" || resp.Logs[1].Stream != "stderr" {
+		t.Fatalf("Logs content mismatch: %+v", resp.Logs)
+	}
+}
+
 

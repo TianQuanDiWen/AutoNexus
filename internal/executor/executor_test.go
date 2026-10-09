@@ -61,6 +61,58 @@ readLoop:
 		t.Fatalf("Expected to receive logs through broadcaster, but received none")
 	}
 	t.Logf("Task executed successfully, received %d log events", receivedLogs)
+
+	// 验证单任务专属日志获取
+	taskLogs := b.GetTaskHistory(task.ID)
+	if len(taskLogs) == 0 {
+		t.Fatalf("Expected GetTaskHistory to return logs for task %s, but got 0", task.ID)
+	}
+	t.Logf("GetTaskHistory returned %d logs for task %s", len(taskLogs), task.ID)
+}
+
+func TestBroadcasterTaskLogs(t *testing.T) {
+	b := NewBroadcaster(10)
+	b.logDir = t.TempDir() // 使用测试隔离临时目录
+
+	taskID := "task_isolated_test"
+	b.StartTaskSession(taskID)
+
+	b.Broadcast(LogEntry{
+		Timestamp: "12:00:00.000",
+		TaskID:    taskID,
+		Stream:    "stdout",
+		Message:   "hello from isolated task",
+	})
+	b.Broadcast(LogEntry{
+		Timestamp: "12:00:01.000",
+		TaskID:    "another_task",
+		Stream:    "stdout",
+		Message:   "hello from another task",
+	})
+
+	b.EndTaskSession(taskID)
+
+	// 验证 task_isolated_test 仅包含自己的日志
+	logs := b.GetTaskHistory(taskID)
+	if len(logs) != 1 {
+		t.Fatalf("Expected 1 log for %s, got %d", taskID, len(logs))
+	}
+	if logs[0].Message != "hello from isolated task" {
+		t.Fatalf("Unexpected message: %s", logs[0].Message)
+	}
+
+	// 清空内存缓存，验证从持久化日志文件恢复的能力
+	b.mu.Lock()
+	delete(b.taskLogs, taskID)
+	b.mu.Unlock()
+
+	restoredLogs := b.GetTaskHistory(taskID)
+	if len(restoredLogs) != 1 {
+		t.Fatalf("Expected 1 restored log from file, got %d", len(restoredLogs))
+	}
+	if restoredLogs[0].Message != "hello from isolated task" {
+		t.Fatalf("Unexpected restored message: %s", restoredLogs[0].Message)
+	}
 }
 
 func TestExecutorEmergencyStop(t *testing.T) {

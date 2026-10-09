@@ -47,6 +47,9 @@ func (r *Runner) Run(ctx context.Context, task *config.TaskConfig) (res *TaskRes
 		Success: false,
 	}
 
+	r.broadcaster.StartTaskSession(task.ID)
+	defer r.broadcaster.EndTaskSession(task.ID)
+
 	// 1. 提前剥离可执行文件路径与工作目录外层多余引号
 	exePath := strings.Trim(strings.TrimSpace(task.Executable), `"'`)
 	workingDir := strings.Trim(strings.TrimSpace(task.WorkingDir), `"'`)
