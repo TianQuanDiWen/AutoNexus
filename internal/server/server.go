@@ -12,10 +12,17 @@ import (
 	"autonexus/internal/config"
 	"autonexus/internal/engine"
 	"autonexus/internal/executor"
+	"autonexus/internal/maa"
 )
 
 //go:embed web/index.html
 var indexHTML []byte
+
+//go:embed web/redesign.css
+var redesignCSS []byte
+
+//go:embed web/workspace.js
+var workspaceJS []byte
 
 // Server HTTP 与 WebSocket Web 服务
 type Server struct {
@@ -54,6 +61,8 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("PUT /api/v1/tasks/{id}", s.handleUpdateTask)
 	s.mux.HandleFunc("DELETE /api/v1/tasks/{id}", s.handleDeleteTask)
 	s.mux.HandleFunc("GET /api/v1/tasks/{id}/logs", s.handleGetTaskLogs)
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}/maa", s.handleGetTaskMAAConfig)
+	s.mux.HandleFunc("POST /api/v1/tasks/{id}/maa", s.handleUpdateTaskMAAConfig)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/run", s.handleRunTask)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/toggle", s.handleToggleTask)
 	s.mux.HandleFunc("POST /api/v1/tasks/reorder", s.handleReorderTasks)
@@ -68,6 +77,14 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(indexHTML)
+	})
+	s.mux.HandleFunc("GET /assets/redesign.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		_, _ = w.Write(redesignCSS)
+	})
+	s.mux.HandleFunc("GET /assets/workspace.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		_, _ = w.Write(workspaceJS)
 	})
 }
 
@@ -311,6 +328,119 @@ func (s *Server) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleGetTaskMAAConfig(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("id")
+	if taskID == "" {
+		s.writeError(w, http.StatusBadRequest, "缺少 task id")
+		return
+	}
+
+	cfg := s.configMgr.Get()
+	var targetTask *config.TaskConfig
+	for _, t := range cfg.Tasks {
+		if t.ID == taskID {
+			targetTask = t
+			break
+		}
+	}
+	if targetTask == nil {
+		s.writeError(w, http.StatusNotFound, "未找到任务")
+		return
+	}
+
+	proj, err := maa.DetectProject(targetTask.WorkingDir, targetTask.Executable)
+	if err != nil {
+		s.writeJSON(w, http.StatusOK, map[string]any{
+			"is_maa": false,
+			"error":  err.Error(),
+		})
+		return
+	}
+
+	selectedConfigID := r.URL.Query().Get("config_id")
+	if selectedConfigID == "" && targetTask.MAAConfigID != "" {
+		selectedConfigID = targetTask.MAAConfigID
+	}
+
+	view, err := maa.GetConfigView(proj, selectedConfigID)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "解析 MAA 配置失败: "+err.Error())
+		return
+	}
+
+	// 若任务当前未绑定 MAAConfigName 或已漂移，自动补齐
+	if view.ActiveConfigID != "" && targetTask.MAAConfigName == "" {
+		for _, p := range view.Profiles {
+			if p.ID == view.ActiveConfigID {
+				targetTask.MAAConfigID = p.ID
+				targetTask.MAAConfigName = p.Name
+				_ = s.configMgr.UpdateTask(targetTask)
+				break
+			}
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleUpdateTaskMAAConfig(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("id")
+	if taskID == "" {
+		s.writeError(w, http.StatusBadRequest, "缺少 task id")
+		return
+	}
+
+	cfg := s.configMgr.Get()
+	var targetTask *config.TaskConfig
+	for _, t := range cfg.Tasks {
+		if t.ID == taskID {
+			targetTask = t
+			break
+		}
+	}
+	if targetTask == nil {
+		s.writeError(w, http.StatusNotFound, "未找到任务")
+		return
+	}
+
+	proj, err := maa.DetectProject(targetTask.WorkingDir, targetTask.Executable)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "该任务未检测到有效的 MAA 项目: "+err.Error())
+		return
+	}
+
+	var req maa.TaskUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "解析请求 JSON 失败: "+err.Error())
+		return
+	}
+
+	if err := maa.SaveConfig(proj, &req); err != nil {
+		s.writeError(w, http.StatusInternalServerError, "保存 MAA 配置失败: "+err.Error())
+		return
+	}
+
+	// 记录选定的执行配置预设
+	if req.ConfigID != "" {
+		targetTask.MAAConfigID = req.ConfigID
+		if view, err := maa.GetConfigView(proj, req.ConfigID); err == nil {
+			for _, p := range view.Profiles {
+				if p.ID == req.ConfigID {
+					targetTask.MAAConfigName = p.Name
+					break
+				}
+			}
+		}
+		_ = s.configMgr.UpdateTask(targetTask)
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"message":            "MAA 自动化配置已成功保存并在执行时生效",
+		"active_config_id":   targetTask.MAAConfigID,
+		"active_config_name": targetTask.MAAConfigName,
+	})
+}
+
 // FSItem 文件系统项目（目录或文件）
 type FSItem struct {
 	Name string `json:"name"`
@@ -390,5 +520,3 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 
 	s.writeJSON(w, http.StatusOK, resp)
 }
-
-

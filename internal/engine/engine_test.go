@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,4 +106,37 @@ func TestEngineQueueFlow(t *testing.T) {
 	t.Logf("Engine successfully skipped all completed tasks in routine mode")
 
 	_ = os.Remove(cfgPath)
+}
+
+func TestEngineMAAProfileActivationFailureAbortsTask(t *testing.T) {
+	tempDir := t.TempDir()
+	cfgPath := filepath.Join(tempDir, "config.json")
+	cfgMgr, err := config.NewManager(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 绑定了一个无效的 MAAConfigID，激活必失败
+	task := &config.TaskConfig{
+		ID:              "t_maa_fail",
+		Name:            "MAA Fail Task",
+		Enabled:         true,
+		Executable:      "cmd.exe",
+		Args:            []string{"/c", "echo should_not_run"},
+		MAAConfigID:     "invalid_profile_id_not_exist",
+		CooldownSeconds: 0,
+	}
+	_ = cfgMgr.AddTask(task)
+
+	broadcaster := executor.NewBroadcaster(10)
+	runner := executor.NewRunner(broadcaster)
+	eng := NewEngine(cfgMgr, runner, broadcaster)
+
+	res := eng.executeOneTask(context.Background(), task, 0, 1)
+	if res.Success {
+		t.Fatalf("Bug 6 regressed: task should fail when MAA profile activation fails!")
+	}
+	if !strings.Contains(res.ErrorMsg, "激活 MAA 预设失败") {
+		t.Fatalf("Unexpected error msg: %s", res.ErrorMsg)
+	}
 }

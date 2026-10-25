@@ -7,26 +7,31 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"autonexus/internal/maa"
 )
 
 // TaskConfig 自动化单项任务配置
 type TaskConfig struct {
-	ID                  string   `json:"id"`                             // 任务唯一标识符
-	Name                string   `json:"name"`                           // 任务友好名称
-	Enabled             bool     `json:"enabled"`                        // 是否参与队列轮转调度
-	Executable          string   `json:"executable"`                     // 执行程序路径 (如 madoaxvv-agent.exe)
-	Args                []string `json:"args"`                           // 启动命令行参数
-	WorkingDir          string   `json:"working_dir"`                    // 工作目录 (留空则使用可执行文件所在目录)
-	GameProcessNames    []string `json:"game_process_names"`             // 关联游戏进程名，用于任务结束后的残留清理
-	TimeoutSeconds      int      `json:"timeout_seconds"`                // 最大运行时长限制 (秒，0 为不限)
-	NoLogTimeoutSeconds int      `json:"no_log_timeout_seconds"`         // 静默无日志卡死检测阈值 (秒，0 为禁用)
-	CooldownSeconds     int      `json:"cooldown_seconds"`               // 任务结束后的冷却释放时间 (秒，默认 5~10s)
-	RefreshTime         string   `json:"refresh_time,omitempty"`         // 每日日常刷新时间 (如 "04:00"，留空不限制)
-	LastStartTime       string   `json:"last_start_time,omitempty"`      // 最近一次启动时间 (如 2006-01-02 15:04:05)
-	LastDuration        string   `json:"last_duration,omitempty"`        // 最近一次运行时长 (如 12s, 641ms)
-	LastSuccess         *bool    `json:"last_success,omitempty"`         // 最近一次运行是否成功 (true=成功, false=失败)
-	LastError           string   `json:"last_error,omitempty"`           // 若失败记录具体错误原因
-	IsCompletedToday    bool     `json:"is_completed_today,omitempty"`   // 动态状态：在当前日常周期内是否已成功执行
+	ID                  string   `json:"id"`                           // 任务唯一标识符
+	Name                string   `json:"name"`                         // 任务友好名称
+	Enabled             bool     `json:"enabled"`                      // 是否参与队列轮转调度
+	Executable          string   `json:"executable"`                   // 执行程序路径 (如 madoaxvv-agent.exe)
+	Args                []string `json:"args"`                         // 启动命令行参数
+	WorkingDir          string   `json:"working_dir"`                  // 工作目录 (留空则使用可执行文件所在目录)
+	GameProcessNames    []string `json:"game_process_names"`           // 关联游戏进程名，用于任务结束后的残留清理
+	TimeoutSeconds      int      `json:"timeout_seconds"`              // 最大运行时长限制 (秒，0 为不限)
+	NoLogTimeoutSeconds int      `json:"no_log_timeout_seconds"`       // 静默无日志卡死检测阈值 (秒，0 为禁用)
+	CooldownSeconds     int      `json:"cooldown_seconds"`             // 任务结束后的冷却释放时间 (秒，默认 5~10s)
+	RefreshTime         string   `json:"refresh_time,omitempty"`       // 每日日常刷新时间 (如 "04:00"，留空不限制)
+	LastStartTime       string   `json:"last_start_time,omitempty"`    // 最近一次启动时间 (如 2006-01-02 15:04:05)
+	LastDuration        string   `json:"last_duration,omitempty"`      // 最近一次运行时长 (如 12s, 641ms)
+	LastSuccess         *bool    `json:"last_success,omitempty"`       // 最近一次运行是否成功 (true=成功, false=失败)
+	LastError           string   `json:"last_error,omitempty"`         // 若失败记录具体错误原因
+	IsCompletedToday    bool     `json:"is_completed_today,omitempty"` // 动态状态：在当前日常周期内是否已成功执行
+	IsMAA               bool     `json:"is_maa,omitempty"`             // 动态状态：是否检测到关联 MAA/MXU 自动化项目
+	MAAConfigID         string   `json:"maa_config_id,omitempty"`      // 用户选中的 MAA 执行配置预设 ID
+	MAAConfigName       string   `json:"maa_config_name,omitempty"`    // 用户选中的 MAA 执行配置预设名称
 }
 
 // Config 全局服务配置
@@ -222,6 +227,20 @@ func (m *Manager) UpdateTask(task *TaskConfig) error {
 			}
 			if task.LastError == "" {
 				task.LastError = t.LastError
+			}
+			effectiveWorkingDir := func(dir, executable string) string {
+				if dir == "" {
+					dir = filepath.Dir(executable)
+				}
+				return filepath.Clean(dir)
+			}
+			pathChanged := task.Executable != t.Executable || effectiveWorkingDir(task.WorkingDir, task.Executable) != effectiveWorkingDir(t.WorkingDir, t.Executable)
+			if pathChanged || !maa.HasInterface(task.WorkingDir, task.Executable) {
+				task.MAAConfigID = ""
+				task.MAAConfigName = ""
+			} else if task.MAAConfigID == "" {
+				task.MAAConfigID = t.MAAConfigID
+				task.MAAConfigName = t.MAAConfigName
 			}
 			m.cfg.Tasks[i] = task
 			found = true

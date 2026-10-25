@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -82,4 +84,177 @@ func TestDailyCycleCalculations(t *testing.T) {
 	if waitDurPassed != 0 {
 		t.Fatalf("wait duration passed should be 0, got %v", waitDurPassed)
 	}
+}
+
+func TestUpdateTaskPreservesMAABindings(t *testing.T) {
+	tempDir := t.TempDir()
+	// 创建 interface.json 模拟有效的 MAA 项目目录
+	if err := os.WriteFile(filepath.Join(tempDir, "interface.json"), []byte(`{"name":"TestGame"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr, err := NewManager(filepath.Join(tempDir, "config.json"))
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	task := &TaskConfig{
+		ID:            "test_task_1",
+		Name:          "初始任务名",
+		Executable:    filepath.Join(tempDir, "app.exe"),
+		WorkingDir:    tempDir,
+		MAAConfigID:   "profile_daily",
+		MAAConfigName: "日常预设",
+	}
+	if err := mgr.AddTask(task); err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	// 模拟前端编辑启动设置（只更新了名称与超时，未传递 MAAConfigID）
+	updateReq := &TaskConfig{
+		ID:             "test_task_1",
+		Name:           "修改后的任务名",
+		Executable:     filepath.Join(tempDir, "app.exe"),
+		WorkingDir:     tempDir,
+		TimeoutSeconds: 3600,
+	}
+	if err := mgr.UpdateTask(updateReq); err != nil {
+		t.Fatalf("UpdateTask failed: %v", err)
+	}
+
+	updated := mgr.Get().Tasks[0]
+	if updated.Name != "修改后的任务名" {
+		t.Fatalf("Name not updated: %s", updated.Name)
+	}
+	if updated.MAAConfigID != "profile_daily" || updated.MAAConfigName != "日常预设" {
+		t.Fatalf("Bug 3 regressed: MAA profile binding lost on task update! ID=%s, Name=%s", updated.MAAConfigID, updated.MAAConfigName)
+	}
+}
+
+func TestUpdateTaskClearsMAABindingsWhenProgramChangedOrNonMAA(t *testing.T) {
+	tempDir := t.TempDir()
+	// 创建 interface.json 模拟有效的 MAA 项目目录
+	if err := os.WriteFile(filepath.Join(tempDir, "interface.json"), []byte(`{"name":"TestGame"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr, err := NewManager(filepath.Join(tempDir, "config.json"))
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	task := &TaskConfig{
+		ID:            "test_task_2",
+		Name:          "MAA任务",
+		Executable:    filepath.Join(tempDir, "app.exe"),
+		WorkingDir:    tempDir,
+		MAAConfigID:   "profile_daily",
+		MAAConfigName: "日常预设",
+	}
+	if err := mgr.AddTask(task); err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	// 场景 1: 用户修改了执行程序为普通程序（没有 interface.json）
+	updateNonMAA := &TaskConfig{
+		ID:          "test_task_2",
+		Name:        "改为普通程序",
+		Executable:  "cmd.exe",
+		WorkingDir:  "",
+		MAAConfigID: "profile_daily", // 前端可能残留或携带旧绑定
+	}
+	if err := mgr.UpdateTask(updateNonMAA); err != nil {
+		t.Fatalf("UpdateTask failed: %v", err)
+	}
+
+	updated := mgr.Get().Tasks[0]
+	if updated.MAAConfigID != "" || updated.MAAConfigName != "" {
+		t.Fatalf("MAA bindings should be cleared for non-MAA executable! Got ID=%s, Name=%s", updated.MAAConfigID, updated.MAAConfigName)
+	}
+}
+
+func TestUpdateTaskCanClearWorkingDirWhenChangingProgram(t *testing.T) {
+	for _, changeProgram := range []bool{false, true} {
+		tempDir := t.TempDir()
+		configPath := filepath.Join(tempDir, "config.json")
+		mgr, err := NewManager(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.AddTask(&TaskConfig{ID: "clear-dir", Executable: filepath.Join(tempDir, "old.exe"), WorkingDir: tempDir}); err != nil {
+			t.Fatal(err)
+		}
+		executable := filepath.Join(tempDir, "old.exe")
+		if changeProgram {
+			executable = "cmd.exe"
+		}
+		if err := mgr.UpdateTask(&TaskConfig{ID: "clear-dir", Executable: executable, WorkingDir: ""}); err != nil {
+			t.Fatal(err)
+		}
+		if got := mgr.Get().Tasks[0].WorkingDir; got != "" {
+			t.Fatalf("WorkingDir should clear, got %q", got)
+		}
+		reloaded, err := NewManager(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := reloaded.Get().Tasks[0].WorkingDir; got != "" {
+			t.Fatalf("persisted WorkingDir should clear, got %q", got)
+		}
+	}
+}
+
+func TestUpdateTaskMAABindingUsesEffectiveWorkingDir(t *testing.T) {
+	tempDir := t.TempDir()
+	makeProject := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "interface.json"), []byte(`{"name":"TestGame"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("empty directory equals executable directory", func(t *testing.T) {
+		projectDir := filepath.Join(tempDir, "same")
+		makeProject(projectDir)
+		mgr, err := NewManager(filepath.Join(projectDir, "config.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		executable := filepath.Join(projectDir, "app.exe")
+		if err := mgr.AddTask(&TaskConfig{ID: "same", Executable: executable, WorkingDir: projectDir, MAAConfigID: "daily", MAAConfigName: "Daily"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.UpdateTask(&TaskConfig{ID: "same", Executable: executable, WorkingDir: ""}); err != nil {
+			t.Fatal(err)
+		}
+		got := mgr.Get().Tasks[0]
+		if got.WorkingDir != "" || got.MAAConfigID != "daily" {
+			t.Fatalf("expected empty directory and retained binding, got %+v", got)
+		}
+	})
+
+	t.Run("different MAA directory clears binding", func(t *testing.T) {
+		programDir := filepath.Join(tempDir, "program")
+		oldDir, newDir := filepath.Join(tempDir, "a"), filepath.Join(tempDir, "b")
+		makeProject(oldDir)
+		makeProject(newDir)
+		mgr, err := NewManager(filepath.Join(tempDir, "other.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		executable := filepath.Join(programDir, "app.exe")
+		if err := mgr.AddTask(&TaskConfig{ID: "different", Executable: executable, WorkingDir: oldDir, MAAConfigID: "daily", MAAConfigName: "Daily"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.UpdateTask(&TaskConfig{ID: "different", Executable: executable, WorkingDir: newDir}); err != nil {
+			t.Fatal(err)
+		}
+		got := mgr.Get().Tasks[0]
+		if got.MAAConfigID != "" || got.MAAConfigName != "" {
+			t.Fatalf("expected cleared binding after directory change, got %+v", got)
+		}
+	})
 }

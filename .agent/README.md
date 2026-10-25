@@ -140,6 +140,17 @@ type TaskConfig struct {
 
 ## 五、 常用开发与测试指令
 
+### 前端工作台（2026-10-25）
+
+- 前端仍使用原生 HTML/CSS/JavaScript，无 npm 构建依赖。`internal/server/web/index.html` 保留基础配置与文件浏览器；`redesign.css` 承载响应式工作台样式；`workspace.js` 承载任务筛选、排序、日志联动、请求反馈和侧边面板交互。
+- 三个静态资源均由 Go `//go:embed` 打包，新增同源路由 `/assets/redesign.css`、`/assets/workspace.js`。修改资源后必须重新编译 exe 才能用于桌面端。
+- 桌面端为任务队列与日志双栏，760px 以下切换任务/日志视图并固定底部启停按钮。配置为右侧面板，高级参数默认折叠。
+- 日志支持任务、输出来源与文本筛选；向上滚动暂停跟随；全局和选中任务实时显示最多 1200 行。任务完整历史仍由原日志 API 提供，复制仅复制当前显示筛选结果。
+- 所有调度启动操作均须检查 HTTP 错误，并依据服务可用性、调度状态与请求进行中状态禁用按钮。前端不得修改现有串行执行、刷新周期或强制运行语义。
+- 编辑关闭时检查未保存修改，成功保存后直接关闭；MAA 预设切换同样检查未保存修改。保存 MAA 配置仅影响后续启动。
+- 任务 PUT 使用整体更新语义，`working_dir: ""` 表示明确清空；MAA PI 与 MFAA 输入项优先更新既有 `values[inputKey]`，若只有 `value` 则更新该字段，并保留对象中的其他配置字段。
+- 未保存修改和删除任务使用页面内异步确认面板，避免浏览器原生阻塞对话框。前端错误反馈、取消/确认和保存关闭回归可通过 `node --test internal/server/web/workspace.test.cjs` 运行；资源打包由 `TestEmbeddedWorkspaceAssets` 验证。
+
 在执行修改后，务必在项目根目录下通过终端进行闭环回归验证：
 
 ```powershell

@@ -8,6 +8,7 @@ import (
 
 	"autonexus/internal/config"
 	"autonexus/internal/executor"
+	"autonexus/internal/maa"
 )
 
 // State 状态机状态枚举
@@ -111,11 +112,14 @@ func (e *Engine) GetStatus() StatusSnapshot {
 	resultsCopy := make([]*executor.TaskResult, len(e.lastResults))
 	copy(resultsCopy, e.lastResults)
 
-	// 动态计算每个任务在当前日常周期内是否已完成
+	// 动态计算每个任务在当前日常周期内是否已完成，并检测是否是 MAA 自动化项目
 	tasksCopy := make([]*config.TaskConfig, len(cfg.Tasks))
 	for i, t := range cfg.Tasks {
 		item := *t
 		item.IsCompletedToday = config.IsTaskCompletedInCurrentCycle(t, now)
+		if maa.HasInterface(t.WorkingDir, t.Executable) {
+			item.IsMAA = true
+		}
 		tasksCopy[i] = &item
 	}
 
@@ -409,6 +413,28 @@ func (e *Engine) executeOneTask(ctx context.Context, task *config.TaskConfig, id
 	e.currentTaskIndex = idx + 1
 	e.taskStartTime = startTime
 	e.mu.Unlock()
+
+	// 若该任务指定了 MAA 执行配置预设，确保在启动该进程前激活该预设
+	if task.MAAConfigID != "" {
+		if err := maa.EnsureActiveProfile(task.WorkingDir, task.Executable, task.MAAConfigID); err != nil {
+			errStr := fmt.Sprintf("激活 MAA 预设失败: %v", err)
+			e.broadcaster.EmitSystemLog("SCHEDULER", fmt.Sprintf("❌ [MAA] %s", errStr))
+			res := &executor.TaskResult{
+				TaskID:   task.ID,
+				Success:  false,
+				ErrorMsg: errStr,
+				Duration: time.Since(startTime),
+			}
+			startTimeStr := startTime.Format("2006-01-02 15:04:05")
+			_ = e.configMgr.UpdateTaskRunStats(task.ID, startTimeStr, res.Duration.Round(time.Millisecond).String(), false, errStr)
+			e.mu.Lock()
+			e.lastResults = append(e.lastResults, res)
+			e.mu.Unlock()
+			return res
+		} else if task.MAAConfigName != "" {
+			e.broadcaster.EmitSystemLog("SCHEDULER", fmt.Sprintf("🎯 [MAA] 已激活执行预设: %s", task.MAAConfigName))
+		}
+	}
 
 	e.broadcaster.EmitSystemLog("SCHEDULER", fmt.Sprintf("[%d/%d] 开始执行: %s", idx+1, total, task.Name))
 

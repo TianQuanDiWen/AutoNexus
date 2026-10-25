@@ -281,4 +281,105 @@ func TestServerTaskLogsAPI(t *testing.T) {
 	}
 }
 
+func TestServerMAAConfigAPI(t *testing.T) {
+	srv, cfgMgr, _ := setupTestServer(t)
+	tempDir := t.TempDir()
 
+	// 构造 mock MAA 项目
+	interfaceContent := `{
+  "interface_version": 2,
+  "name": "MockGame",
+  "task": [
+    {
+      "name": "DailyReward",
+      "label": "🎁 每日签到",
+      "default_check": true
+    }
+  ]
+}`
+	_ = os.WriteFile(filepath.Join(tempDir, "interface.json"), []byte(interfaceContent), 0644)
+	_ = os.MkdirAll(filepath.Join(tempDir, "config"), 0755)
+	mxuContent := `{
+  "version": "1.0",
+  "instances": [
+    {
+      "id": "i1",
+      "tasks": [
+        { "taskName": "DailyReward", "enabled": true }
+      ]
+    }
+  ]
+}`
+	_ = os.WriteFile(filepath.Join(tempDir, "config", "mxu-MockGame.json"), []byte(mxuContent), 0644)
+
+	task := &config.TaskConfig{
+		ID:         "task_mock_maa",
+		Name:       "Mock MAA 任务",
+		Executable: filepath.Join(tempDir, "MockGame.exe"),
+		WorkingDir: tempDir,
+		Enabled:    true,
+	}
+	if err := cfgMgr.AddTask(task); err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	// 1. 测试 GET /api/v1/tasks/{id}/maa
+	reqGet := httptest.NewRequest("GET", "/api/v1/tasks/task_mock_maa/maa", nil)
+	recGet := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recGet, reqGet)
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d: %s", recGet.Code, recGet.Body.String())
+	}
+
+	// 2. 测试 POST /api/v1/tasks/{id}/maa (关闭 DailyReward)
+	postBody := map[string]any{
+		"tasks": []map[string]any{
+			{"name": "DailyReward", "enabled": false},
+		},
+	}
+	postBytes, _ := json.Marshal(postBody)
+	reqPost := httptest.NewRequest("POST", "/api/v1/tasks/task_mock_maa/maa", bytes.NewReader(postBytes))
+	recPost := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recPost, reqPost)
+	if recPost.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK on save, got %d: %s", recPost.Code, recPost.Body.String())
+	}
+
+	// 3. 再次 GET 验证已更新为 false
+	recGet2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recGet2, reqGet)
+	var respGet struct {
+		Tasks []struct {
+			Name    string `json:"name"`
+			Enabled bool   `json:"enabled"`
+		} `json:"tasks"`
+	}
+	_ = json.Unmarshal(recGet2.Body.Bytes(), &respGet)
+	if len(respGet.Tasks) == 0 || respGet.Tasks[0].Enabled {
+		t.Fatalf("Task should be disabled after update: %+v", respGet)
+	}
+
+	// 4. 测试修改普通设置 (PUT /api/v1/tasks/{id}) 时 MAA 预设绑定不会丢失
+	task.MAAConfigID = "i1"
+	task.MAAConfigName = "默认配置"
+	_ = cfgMgr.UpdateTask(task)
+
+	putBody := map[string]any{
+		"id":         "task_mock_maa",
+		"name":       "修改后的名称",
+		"executable": filepath.Join(tempDir, "MockGame.exe"),
+		"enabled":    true,
+	}
+	putBytes, _ := json.Marshal(putBody)
+	reqPut := httptest.NewRequest("PUT", "/api/v1/tasks/task_mock_maa", bytes.NewReader(putBytes))
+	recPut := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recPut, reqPut)
+	if recPut.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK on PUT task, got %d: %s", recPut.Code, recPut.Body.String())
+	}
+
+	chkTask := cfgMgr.Get().Tasks[0]
+	if chkTask.MAAConfigID != "i1" || chkTask.MAAConfigName != "默认配置" {
+		t.Fatalf("Bug 3 regressed: MAA profile lost after editing task settings! ID=%s, Name=%s", chkTask.MAAConfigID, chkTask.MAAConfigName)
+	}
+}
