@@ -16,6 +16,9 @@ func TestDefaultConfigLocalOnly(t *testing.T) {
 	if def.AuthToken != "" {
 		t.Fatal("Expected empty auth password by default")
 	}
+	if def.Theme != "auto" {
+		t.Fatalf("Expected default theme auto, got %q", def.Theme)
+	}
 
 	// 旧配置文件缺少 lan_enabled 字段时，按默认关闭处理
 	tempDir := t.TempDir()

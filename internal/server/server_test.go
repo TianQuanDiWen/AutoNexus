@@ -210,6 +210,32 @@ func TestWSCheckOrigin(t *testing.T) {
 	}
 }
 
+func TestServerThemeSetting(t *testing.T) {
+	srv, cfgMgr, _ := setupTestServer(t)
+
+	// 正常保存主题
+	body, _ := json.Marshal(map[string]string{"theme": "light"})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected 200 on theme update, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if cfgMgr.Get().Theme != "light" {
+		t.Fatalf("Expected theme persisted as light, got %q", cfgMgr.Get().Theme)
+	}
+
+	// 非法主题被拒绝且不落盘
+	badBody, _ := json.Marshal(map[string]string{"theme": "sepia"})
+	recBad := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recBad, httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(badBody)))
+	if recBad.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for invalid theme, got %d", recBad.Code)
+	}
+	if cfgMgr.Get().Theme != "light" {
+		t.Fatalf("Theme should be unchanged after invalid update, got %q", cfgMgr.Get().Theme)
+	}
+}
+
 func TestServerLANDisabled(t *testing.T) {
 	srv, cfgMgr, _ := setupTestServer(t)
 

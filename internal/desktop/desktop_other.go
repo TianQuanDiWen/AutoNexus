@@ -12,6 +12,7 @@ type Config struct {
 	Width       uint
 	Height      uint
 	Debug       bool
+	Theme       string
 	OnStopQueue func()
 	OnExit      func()
 }

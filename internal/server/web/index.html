@@ -28,7 +28,7 @@
       padding-bottom: 30px;
     }
     header {
-      background: rgba(17, 24, 39, 0.85);
+      background: var(--header-bg);
       backdrop-filter: blur(12px);
       position: sticky;
       top: 0;
@@ -77,12 +77,12 @@
       font-weight: 700;
       letter-spacing: 0.05em;
     }
-    .badge-IDLE { background: #064e3b; color: #6ee7b7; }
-    .badge-RUNNING { background: #1e3a8a; color: #93c5fd; animation: pulse 2s infinite; }
-    .badge-COOLING { background: #78350f; color: #fde68a; }
-    .badge-STOPPING { background: #7f1d1d; color: #fca5a5; }
-    .badge-PREPARE { background: #312e81; color: #c7d2fe; }
-    .badge-WAITING_SCHEDULE { background: #4c1d95; color: #ddd6fe; animation: pulse 2s infinite; }
+    .badge-IDLE { background: var(--pill-idle-bg); color: var(--pill-idle-text); }
+    .badge-RUNNING { background: var(--pill-run-bg); color: var(--pill-run-text); animation: pulse 2s infinite; }
+    .badge-COOLING { background: var(--pill-cool-bg); color: var(--pill-cool-text); }
+    .badge-STOPPING { background: var(--pill-stop-bg); color: var(--pill-stop-text); }
+    .badge-PREPARE { background: var(--pill-prepare-bg); color: var(--pill-prepare-text); }
+    .badge-WAITING_SCHEDULE { background: var(--pill-wait-bg); color: var(--pill-wait-text); animation: pulse 2s infinite; }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.7; }
@@ -95,14 +95,14 @@
       margin-bottom: 16px;
     }
     .stat-item {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      background: var(--inset-bg);
+      border: 1px solid var(--inset-border);
       border-radius: 10px;
       padding: 10px;
       text-align: center;
     }
     .stat-label { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px; }
-    .stat-val { font-size: 1.25rem; font-weight: 700; color: #fff; }
+    .stat-val { font-size: 1.25rem; font-weight: 700; color: var(--text); }
 
     /* 控制按钮 */
     .controls { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
@@ -126,8 +126,8 @@
     .btn-danger { background: #dc2626; color: #fff; }
     .btn-danger:hover { background: #b91c1c; }
     .btn-sm { padding: 6px 12px; font-size: 0.8rem; border-radius: 8px; }
-    .btn-secondary { background: rgba(255, 255, 255, 0.08); color: var(--text); }
-    .btn-secondary:hover { background: rgba(255, 255, 255, 0.15); }
+    .btn-secondary { background: var(--btn2-bg); color: var(--text); }
+    .btn-secondary:hover { background: var(--btn2-hover); }
     .btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
 
     /* 任务列表 */
@@ -158,7 +158,7 @@
     .task-info { flex: 1; min-width: 0; }
     .task-name { font-weight: 600; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .task-meta { font-size: 0.75rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
-    .meta-tag { background: rgba(255, 255, 255, 0.05); padding: 2px 6px; border-radius: 4px; }
+    .meta-tag { background: var(--inset-bg); padding: 2px 6px; border-radius: 4px; }
     .empty-hint {
       text-align: center;
       padding: 30px 16px;
@@ -174,7 +174,7 @@
     .switch input { opacity: 0; width: 0; height: 0; }
     .slider {
       position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-      background-color: #374151; transition: .3s; border-radius: 24px;
+      background-color: var(--slider-off); transition: .3s; border-radius: 24px;
     }
     .slider:before {
       position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px;
@@ -192,7 +192,7 @@
       margin-top: 18px;
     }
     .terminal-header {
-      background: #0f172a;
+      background: var(--surface-3);
       padding: 8px 14px;
       display: flex;
       justify-content: space-between;
@@ -213,18 +213,18 @@
       gap: 3px;
     }
     .log-line { word-break: break-all; white-space: pre-wrap; }
-    .log-time { color: #6b7280; margin-right: 6px; user-select: none; }
+    .log-time { color: var(--log-time); margin-right: 6px; user-select: none; }
     .log-tag { font-weight: 700; margin-right: 6px; }
-    .stream-system { color: #38bdf8; }
-    .stream-stdout { color: #e2e8f0; }
-    .stream-stderr { color: #f87171; }
-    .tag-SCHEDULER { color: #c084fc; }
+    .stream-system { color: var(--log-system); }
+    .stream-stdout { color: var(--log-stdout); }
+    .stream-stderr { color: var(--log-stderr); }
+    .tag-SCHEDULER { color: var(--log-tag-sched); }
 
     /* 模态弹窗 Modal */
     .modal-overlay {
       position: fixed;
       top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0, 0, 0, 0.75);
+      background: var(--overlay);
       backdrop-filter: blur(4px);
       z-index: 100;
       display: none;
@@ -233,8 +233,8 @@
       padding: 16px;
     }
     .modal-card {
-      background: #1e293b;
-      border: 1px solid #334155;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
       border-radius: 16px;
       width: 100%;
       max-width: 540px;
@@ -250,9 +250,9 @@
       width: 100%;
       padding: 10px 12px;
       border-radius: 8px;
-      border: 1px solid #475569;
-      background: #0f172a;
-      color: #fff;
+      border: 1px solid var(--input-border);
+      background: var(--input-bg);
+      color: var(--text);
       font-size: 0.9rem;
       outline: none;
       transition: border-color 0.2s;
@@ -272,9 +272,10 @@
       user-select: none;
       transition: background 0.15s;
     }
-    .fb-item:hover { background: rgba(255, 255, 255, 0.08); }
-    .fb-item.file { color: #93c5fd; }
-    .fb-item.file:hover { background: rgba(59, 130, 246, 0.2); }
+    .fb-item { color: var(--text); }
+    .fb-item:hover { background: var(--menu-hover); }
+    .fb-item.file { color: var(--accent); }
+    .fb-item.file:hover { background: var(--selected-bg); }
 
     /* 移动端细微优化 */
     @media (max-width: 600px) {
@@ -290,69 +291,23 @@
   <header>
     <div class="brand">
       <span class="logo">◈</span>
-      <span>AutoNexus</span><small>AUTOMATION WORKSPACE</small>
+      <span>AutoNexus</span>
     </div>
-    <div class="ws-indicator">
+    <div class="header-actions"><div class="ws-indicator" role="status">
       <div id="wsDot" class="dot"></div>
       <span id="wsText">连接中...</span>
-    </div>
+    </div><button class="btn btn-secondary btn-sm" onclick="openSettingsModal()">设置</button></div>
   </header>
 
   <main class="container">
-    <div class="page-heading"><div><div class="eyebrow">WORKSPACE / 工作台</div><h1>让日常任务，有序运行。</h1><p>编排任务、跟进执行，在一个工作区完成。</p></div><span id="statusHealth" style="color:var(--text-muted);font-size:12px" role="status">正在同步状态…</span></div>
-    <!-- 状态卡片 -->
-    <div class="status-card">
-      <div class="status-header">
-        <div>
-          <span style="font-size:0.85rem; color:var(--text-muted);">调度状态</span>
-          <div style="margin-top:4px;">
-            <span id="stateBadge" class="badge badge-IDLE">IDLE</span>
-          </div>
-        </div>
-        <div id="cooldownBox" style="display:none; text-align:right;">
-          <span style="font-size:0.75rem; color:#fde68a;">系统冷却倒计时</span>
-          <div id="cooldownSec" style="font-size:1.3rem; font-weight:700; color:#fbbf24;">0s</div>
-        </div>
-        <div id="waitScheduleBox" style="display:none; text-align:right;">
-          <span style="font-size:0.75rem; color:#fde68a;">等待执行时间 (<span id="waitTargetTime">04:00</span>)</span>
-          <div style="display:flex; align-items:center; gap:8px; justify-content:flex-end; margin-top:2px;">
-            <div id="waitScheduleSec" style="font-size:1.2rem; font-weight:700; color:#fbbf24;">0s</div>
-            <button class="btn btn-secondary btn-sm" style="padding:2px 8px; font-size:0.75rem;" onclick="skipWait()">⚡ 跳过</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="status-body">
-        <div class="stat-item">
-          <div class="stat-label">当前执行任务</div>
-          <div id="currentTaskName" class="stat-val" style="font-size:1rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">-</div>
-        </div>
-        <div class="stat-item">
-          <div class="stat-label">单项运行时长</div>
-          <div id="elapsedTime" class="stat-val">0s</div>
-        </div>
-        <div class="stat-item">
-          <div class="stat-label">队列位置</div>
-          <div id="progressText" class="stat-val">0 / 0</div>
-        </div>
-      </div>
-
-      <!-- 控制器 -->
-      <div class="controls">
-        <button id="btnStart" class="btn btn-primary" onclick="startQueue()">
-          <span>▶ 一键启动队列</span>
-        </button>
-        <button id="btnStop" class="btn btn-danger" onclick="stopQueue()">
-          <span>⏹ 停止队列</span>
-        </button>
-      </div>
-
-      <div class="run-hint" id="runHint"></div>
-      <div class="status-settings">
-        <label><input type="checkbox" id="chkForceRun">包含今日已完成任务</label>
-        <button type="button" class="btn btn-secondary btn-sm" onclick="openSettingsModal()">⚙ 设置</button>
-      </div>
-    </div>
+    <section class="status-card" id="runControl" data-state="IDLE" aria-label="运行控制">
+      <div class="status-summary"><span id="stateBadge" class="badge badge-IDLE">待命</span><span id="queueSummary">正在获取任务…</span></div>
+      <div class="status-body" id="runtimeDetails" hidden><span id="currentTaskName" title="当前任务"></span><span id="elapsedTime" title="运行耗时"></span><span id="progressText" title="队列位置"></span></div>
+      <div id="cooldownBox" class="state-detail" style="display:none">冷却剩余 <strong id="cooldownSec">0秒</strong></div>
+      <div id="waitScheduleBox" class="state-detail" style="display:none">等待 <span id="waitTargetTime">04:00</span><strong id="waitScheduleSec"></strong><button class="btn btn-secondary btn-sm" onclick="skipWait()">跳过等待</button></div>
+      <label class="force-option"><input type="checkbox" id="chkForceRun">包含今日已完成</label>
+      <div class="controls"><button id="btnStart" class="btn btn-primary" onclick="startQueue()" disabled>启动队列</button><button id="btnStop" class="btn btn-danger" onclick="stopQueue()" disabled>停止队列</button></div>
+    </section>
     <nav class="mobile-tabs" aria-label="工作区切换"><button class="filter-btn selected" data-mobile-view="tasks" aria-pressed="true" onclick="switchMobileView('tasks')">任务队列</button><button class="filter-btn" data-mobile-view="logs" aria-pressed="false" onclick="switchMobileView('logs')">运行日志</button></nav>
     <div class="workspace" id="workspace" data-view="tasks">
     <section class="queue-panel" aria-label="任务队列">
@@ -361,26 +316,20 @@
       <span>任务队列<small id="taskCount">0 项任务</small></span>
       <button class="btn btn-primary btn-sm" onclick="openTaskModal()">+ 添加任务</button>
     </div>
-    <div class="queue-toolbar" role="group" aria-label="筛选任务"><button class="filter-btn selected" data-filter="all" aria-pressed="true" onclick="setTaskFilter('all')">全部</button><button class="filter-btn" data-filter="pending" aria-pressed="false" onclick="setTaskFilter('pending')">待执行</button><button class="filter-btn" data-filter="error" aria-pressed="false" onclick="setTaskFilter('error')">异常</button></div>
-    <div id="taskList" class="task-list">
+    <div class="queue-toolbar" role="group" aria-label="筛选任务"><button class="filter-btn selected" data-filter="all" aria-pressed="true" onclick="setTaskFilter('all')">全部</button><button class="filter-btn" data-filter="pending" aria-pressed="false" onclick="setTaskFilter('pending')">待执行</button><button class="filter-btn" data-filter="done" aria-pressed="false" onclick="setTaskFilter('done')">已完成</button><button class="filter-btn" data-filter="error" aria-pressed="false" onclick="setTaskFilter('error')">异常</button></div>
+    <div id="taskList" class="task-list" tabindex="0" aria-label="任务列表">
       <!-- 动态插入任务项 -->
     </div>
 
     </section>
     <!-- 实时终端控制台 -->
     <div class="terminal-container">
-      <div class="terminal-header">
-        <span id="logTitle">实时日志</span>
-        <div style="display:flex; gap:8px;">
-          <button class="btn btn-secondary btn-sm" onclick="toggleAutoScroll()" id="btnAutoScroll">跟随最新：开</button>
-          <button class="btn btn-secondary btn-sm" onclick="selectTaskLogs(logScope)">刷新</button><button class="btn btn-secondary btn-sm" onclick="copyWorkspaceLogs()">复制</button><button class="btn btn-secondary btn-sm" onclick="clearLogs()">清屏</button>
-        </div>
-      </div>
+      <div class="terminal-header"><span id="logTitle">实时日志</span><div class="log-actions"><button class="btn btn-secondary btn-sm" onclick="toggleAutoScroll()" id="btnAutoScroll" aria-pressed="true">跟随最新</button><details class="task-more log-more"><summary class="btn btn-secondary btn-sm" aria-label="更多日志操作">•••</summary><div class="more-menu"><button id="btnRefreshLogs" onclick="selectTaskLogs(logScope);this.closest('details').open=false" hidden>刷新记录</button><button onclick="copyWorkspaceLogs();this.closest('details').open=false">复制筛选日志</button><button onclick="clearLogs();this.closest('details').open=false">清空当前显示</button></div></details></div></div>
       <div class="log-tools"><select id="logTaskSelect" class="form-input" aria-label="选择日志任务" onchange="selectTaskLogs(this.value)"><option value="">全部任务</option></select><select id="logStream" class="form-input" aria-label="日志输出来源" onchange="renderWorkspaceLogs()"><option value="">全部输出</option><option value="stderr">错误输出</option><option value="stdout">标准输出</option><option value="system">系统消息</option></select><input type="search" id="logSearch" class="form-input" aria-label="搜索日志" placeholder="搜索日志…" oninput="renderWorkspaceLogs()"></div>
       <div id="terminalBody" class="terminal-body" tabindex="0" aria-label="日志内容">
         <div class="log-line stream-system"><span class="log-time">[系统]</span>正在初始化 AutoNexus 调度终端连接...</div>
       </div>
-      <div class="terminal-footer"><span id="logCount">0 行</span><span>向上滚动暂停跟随</span></div>
+      <div class="terminal-footer"><span id="logCount">0 行</span><button id="btnResumeLogs" class="btn btn-secondary btn-sm" onclick="resumeLogFollow()" hidden>回到最新</button></div>
     </div>
     </div>
   </main>
@@ -388,12 +337,16 @@
   <div id="settingsModal" class="modal-overlay" style="z-index:140" onclick="if(event.target===this) closeSettingsModal()">
     <div class="modal-card" style="max-width:480px">
       <div class="modal-title">设置<button class="btn btn-secondary btn-sm" onclick="closeSettingsModal()">✕</button></div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.06);">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--card-border);">
         <span>每日自动调度<small style="display:block;color:var(--text-muted);">每天到点自动启动整个任务队列；各任务自己的「每日最早执行时间」在任务的启动设置里单独配置，互不影响</small></span>
         <span style="display:flex;align-items:center;gap:10px;"><label class="switch"><input type="checkbox" id="chkAutoSchedule" aria-label="开启每日自动调度" onchange="updateScheduleConfig()"><span class="slider"></span></label><input type="time" id="inpScheduleTime" class="form-input" aria-label="每日调度时间" value="04:05" onchange="updateScheduleConfig()"></span>
       </div>
       <div id="nextScheduleTip" style="min-height:18px;font-size:12px;color:var(--text-muted);padding-top:6px;"></div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;border-bottom:1px solid rgba(255,255,255,.06);">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;border-bottom:1px solid var(--card-border);">
+        <span>界面主题<small style="display:block;color:var(--text-muted);">跟随系统时，界面与标题栏实时响应系统深浅色切换</small></span>
+        <select id="selTheme" class="form-input" style="width:118px;" aria-label="界面主题" onchange="updateThemeSetting()"><option value="auto">跟随系统</option><option value="dark">深色</option><option value="light">浅色</option></select>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;border-bottom:1px solid var(--card-border);">
         <span>局域网访问<small style="display:block;color:var(--text-muted);">默认关闭，仅本机 (127.0.0.1) 可打开控制台；开启后同一 Wi-Fi 下的设备均可访问</small></span>
         <label class="switch"><input type="checkbox" id="chkLANAccess" aria-label="开启局域网访问" onchange="updateLANAccess()"><span class="slider"></span></label>
       </div>
@@ -516,7 +469,7 @@
       </div>
 
       <!-- 文件/目录列表容器 -->
-      <div id="fbListContainer" style="height:280px; overflow-y:auto; border:1px solid #334155; border-radius:8px; padding:6px; background:#0b1120;">
+      <div id="fbListContainer">
         <!-- 动态渲染条目 -->
       </div>
 
@@ -592,8 +545,8 @@
       ws = new WebSocket(url);
 
       ws.onopen = () => {
-        document.getElementById('wsDot').className = 'dot connected';
-        document.getElementById('wsText').innerText = '已就绪';
+        logConnected = true;
+        updateConnectionIndicator();
       };
 
       ws.onmessage = (evt) => {
@@ -609,8 +562,8 @@
       };
 
       ws.onclose = () => {
-        document.getElementById('wsDot').className = 'dot';
-        document.getElementById('wsText').innerText = '重连中...';
+        logConnected = false;
+        updateConnectionIndicator();
         setTimeout(connectWS, 2000);
       };
 

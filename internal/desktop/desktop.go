@@ -11,6 +11,7 @@ import (
 
 	"github.com/jchv/go-webview2"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 // Config 桌面窗口与系统托盘初始化配置
@@ -21,6 +22,7 @@ type Config struct {
 	Width       uint   // 初始宽度
 	Height      uint   // 初始高度
 	Debug       bool   // 是否启用开发者工具
+	Theme       string // 界面主题: auto(跟随系统)/dark/light
 	OnStopQueue func() // 托盘菜单“急停所有任务”回调
 	OnExit      func() // 托盘菜单“彻底退出”回调
 }
@@ -203,6 +205,45 @@ func (a *App) Exit() {
 	}
 }
 
+// systemPrefersDark 读取 Windows 个性化设置中的应用主题偏好；读取失败时默认视为深色
+func systemPrefersDark() bool {
+	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, registry.QUERY_VALUE)
+	if err != nil {
+		return true
+	}
+	defer k.Close()
+	val, _, err := k.GetIntegerValue("AppsUseLightTheme")
+	if err != nil {
+		return true
+	}
+	return val == 0
+}
+
+// applyChrome 将原生标题栏/边框着色融入当前界面主题：深色走应用底色，浅色走系统浅色栏。
+// 标题栏/边框着色为 Windows 11 特性，旧系统静默忽略；深色模式属性覆盖到 Windows 10 1809+ (含 19 号旧属性号)
+func applyChrome(hwnd uintptr, dark bool) {
+	enable := uint32(0)
+	if dark {
+		enable = 1
+	}
+	tryAttr := func(attr uintptr) bool {
+		ret, _, _ := procDwmSetWindowAttribute.Call(hwnd, attr, uintptr(unsafe.Pointer(&enable)), unsafe.Sizeof(enable))
+		return ret == 0
+	}
+	if !tryAttr(DWMWA_USE_IMMERSIVE_DARK_MODE) {
+		tryAttr(DWMWA_USE_IMMERSIVE_DARK_MODE_OLD)
+	}
+	// COLORREF 布局为 0x00BBGGRR
+	caption := uint32(0x00161210) // 深色标题栏=应用底色 #101216
+	border := uint32(0x00382c26)  // 深色边框=面板描边 #262c38
+	if !dark {
+		caption = 0x00f6f4f3 // 浅色标题栏=#f3f4f6
+		border = 0x00dbd5d1  // 浅色边框=#d1d5db
+	}
+	procDwmSetWindowAttribute.Call(hwnd, DWMWA_CAPTION_COLOR, uintptr(unsafe.Pointer(&caption)), unsafe.Sizeof(caption))
+	procDwmSetWindowAttribute.Call(hwnd, DWMWA_BORDER_COLOR, uintptr(unsafe.Pointer(&border)), unsafe.Sizeof(border))
+}
+
 // Run 启动 WebView2 桌面窗口与系统托盘事件循环 (必须在 OS 主线程运行)
 func Run(cfg Config) error {
 	runtime.LockOSThread()
@@ -233,6 +274,8 @@ func Run(cfg Config) error {
 	defer w.Destroy()
 
 	hwnd := uintptr(w.Window())
+	dark := cfg.Theme == "dark" || (cfg.Theme != "light" && systemPrefersDark())
+	applyChrome(hwnd, dark)
 	hIcon, _, _ := procLoadIconW.Call(0, uintptr(IDI_APPLICATION))
 
 	app := &App{
@@ -251,6 +294,13 @@ func Run(cfg Config) error {
 
 	// 添加系统托盘图标
 	app.addTrayIcon()
+
+	// 网页端把解析后的主题 (含跟随系统的实时变化) 推送到原生侧，标题栏即刻同步
+	_ = w.Bind("__autonexusSetTheme", func(theme string) {
+		if theme == "dark" || theme == "light" {
+			applyChrome(hwnd, theme == "dark")
+		}
+	})
 
 	// 导航至本地 Web 服务
 	w.Navigate(cfg.URL)

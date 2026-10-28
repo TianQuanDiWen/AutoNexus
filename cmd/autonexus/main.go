@@ -99,6 +99,7 @@ func main() {
 			Title:  "AutoNexus 自动化总控平台",
 			URL:    fmt.Sprintf("http://127.0.0.1:%d", port),
 			LANURL: lanURL,
+			Theme:  cfg.Theme,
 			Width:  1300,
 			Height: 840,
 			Debug:  *debugUI,

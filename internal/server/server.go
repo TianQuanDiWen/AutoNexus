@@ -271,20 +271,23 @@ func (s *Server) handleUpdateSchedule(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"message": "定时调度配置已更新"})
 }
 
-// handleUpdateSettings 更新局域网访问等通用设置
+// handleUpdateSettings 更新局域网访问、界面主题等通用设置
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		LANEnabled *bool `json:"lan_enabled"`
+		LANEnabled *bool  `json:"lan_enabled"`
+		Theme      string `json:"theme"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "解析请求参数失败")
 		return
 	}
-	if req.LANEnabled != nil {
-		if err := s.configMgr.UpdateLANEnabled(*req.LANEnabled); err != nil {
-			s.writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	if req.Theme != "" && req.Theme != "auto" && req.Theme != "dark" && req.Theme != "light" {
+		s.writeError(w, http.StatusBadRequest, "无效的主题设置，仅支持 auto/dark/light")
+		return
+	}
+	if err := s.configMgr.UpdateSettings(req.LANEnabled, req.Theme); err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]string{"message": "设置已保存"})
 }

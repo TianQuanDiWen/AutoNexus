@@ -10,6 +10,7 @@ var (
 	user32   = windows.NewLazySystemDLL("user32.dll")
 	shell32  = windows.NewLazySystemDLL("shell32.dll")
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
+	dwmapi   = windows.NewLazySystemDLL("dwmapi.dll")
 
 	procShowWindow          = user32.NewProc("ShowWindow")
 	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
@@ -24,6 +25,8 @@ var (
 	procLoadIconW           = user32.NewProc("LoadIconW")
 
 	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
+
+	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 
 	procGlobalAlloc      = kernel32.NewProc("GlobalAlloc")
 	procGlobalLock       = kernel32.NewProc("GlobalLock")
@@ -65,6 +68,11 @@ const (
 	TPM_RIGHTBUTTON = 0x0002
 
 	IDI_APPLICATION = 32512
+
+	DWMWA_USE_IMMERSIVE_DARK_MODE     = 20 // 深色标题栏 (Windows 10 20H1+)
+	DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19 // 深色标题栏 (Windows 10 早期版本属性号)
+	DWMWA_BORDER_COLOR                = 34 // 窗口边框着色 (Windows 11)
+	DWMWA_CAPTION_COLOR               = 35 // 标题栏着色 (Windows 11)
 
 	ID_MENU_SHOW     = 2001
 	ID_MENU_COPY_LAN = 2002

@@ -40,6 +40,7 @@ type Config struct {
 	Port            int           `json:"port"`             // 监听端口，默认 18080
 	LANEnabled      bool          `json:"lan_enabled"`      // 局域网访问开关；关闭后仅本机 (127.0.0.1) 可打开控制台
 	AuthToken       string        `json:"auth_token"`       // 访问密码；留空表示不设密码 (局域网开启时界面会红字提醒)
+	Theme           string        `json:"theme"`            // 界面主题: auto(跟随系统深浅色)/dark/light
 	ScheduleEnabled bool          `json:"schedule_enabled"` // 是否开启每日自动定时调度
 	ScheduleTime    string        `json:"schedule_time"`    // 每日自动调度启动时间 (如 "04:05")
 	Tasks           []*TaskConfig `json:"tasks"`            // 任务列表（按调度顺序排列）
@@ -52,6 +53,7 @@ func DefaultConfig() *Config {
 		Port:            18080,
 		LANEnabled:      false, // 默认仅本机可访问控制台，局域网访问需在设置中显式开启
 		AuthToken:       "",
+		Theme:           "auto",
 		ScheduleEnabled: false,
 		ScheduleTime:    "04:05",
 		Tasks:           []*TaskConfig{},
@@ -105,6 +107,9 @@ func (m *Manager) loadOrCreate() error {
 	if cfg.ScheduleTime == "" {
 		cfg.ScheduleTime = "04:05"
 	}
+	if cfg.Theme == "" {
+		cfg.Theme = "auto"
+	}
 	for _, t := range cfg.Tasks {
 		if t.RefreshTime == "" {
 			t.RefreshTime = "04:00"
@@ -131,6 +136,7 @@ func (m *Manager) Get() Config {
 		Port:            m.cfg.Port,
 		LANEnabled:      m.cfg.LANEnabled,
 		AuthToken:       m.cfg.AuthToken,
+		Theme:           m.cfg.Theme,
 		ScheduleEnabled: m.cfg.ScheduleEnabled,
 		ScheduleTime:    m.cfg.ScheduleTime,
 		Tasks:           tasksCopy,
@@ -169,11 +175,38 @@ func (m *Manager) UpdateAuthToken(token string) error {
 
 // UpdateLANEnabled 更新局域网访问开关并落盘
 func (m *Manager) UpdateLANEnabled(enabled bool) error {
+	return m.UpdateSettings(&enabled, "")
+}
+
+// UpdateTheme 更新界面主题 (auto/dark/light) 并落盘
+func (m *Manager) UpdateTheme(theme string) error {
+	return m.UpdateSettings(nil, theme)
+}
+
+// UpdateSettings 校验全部通用设置后，在同一把锁下更新并一次落盘。
+// 未提供的字段保持原值；写入失败时恢复内存中的设置。
+func (m *Manager) UpdateSettings(lanEnabled *bool, theme string) error {
+	if theme != "" && theme != "auto" && theme != "dark" && theme != "light" {
+		return fmt.Errorf("无效的主题设置，仅支持 auto/dark/light")
+	}
+	if lanEnabled == nil && theme == "" {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.cfg.LANEnabled = enabled
-	return m.saveLocked()
+	previousLAN, previousTheme := m.cfg.LANEnabled, m.cfg.Theme
+	if lanEnabled != nil {
+		m.cfg.LANEnabled = *lanEnabled
+	}
+	if theme != "" {
+		m.cfg.Theme = theme
+	}
+	if err := m.saveLocked(); err != nil {
+		m.cfg.LANEnabled, m.cfg.Theme = previousLAN, previousTheme
+		return err
+	}
+	return nil
 }
 
 // SetTaskEnabled 设置特定任务的启停开关

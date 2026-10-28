@@ -12,6 +12,7 @@ let maaSnapshot = '';
 let draggedTaskID = '';
 let lastRenderedState = '';
 let statusAvailable = false;
+let logConnected = false;
 let logLoadVersion = 0;
 let confirmResolver = null;
 const stateLabels = { IDLE: '待命', PREPARE: '准备中', RUNNING: '运行中', COOLING: '冷却中', STOPPING: '正在停止', WAITING_SCHEDULE: '等待执行时间' };
@@ -30,6 +31,22 @@ function escapeHtml(str) {
 const TOKEN_KEY = 'autonexus_token';
 function getAuthToken() {
   try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
+}
+
+// ---- 界面主题：模式来自服务端配置 (auto/dark/light)，auto 经 matchMedia 跟随系统并同步原生标题栏 ----
+function applyTheme() {
+  const mode = (latestStatus && latestStatus.theme) || 'auto';
+  let dark = mode === 'dark';
+  if (mode !== 'dark' && mode !== 'light' && window.matchMedia) {
+    dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  const resolved = dark ? 'dark' : 'light';
+  try { document.documentElement.dataset.theme = resolved; } catch (e) {}
+  if (window.__autonexusSetTheme) { try { window.__autonexusSetTheme(resolved); } catch (e) {} }
+  return resolved;
+}
+if (window.matchMedia) {
+  try { window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme); } catch (e) { /* 旧浏览器无 addEventListener */ }
 }
 function showAuthGate() {
   try {
@@ -226,12 +243,31 @@ function updateControls() {
   const stop = document.getElementById('btnStop');
   stop.disabled = !statusAvailable || !busy || latestStatus.state === 'STOPPING' || pendingActions.has('stop');
   stop.textContent = latestStatus.state === 'STOPPING' || pendingActions.has('stop') ? '正在停止…' : '停止队列';
-  document.getElementById('runHint').textContent = `共 ${tasks.length} 项 · ${tasks.filter(t => t.is_completed_today).length} 项今日已完成 · ${tasks.filter(t => !t.enabled).length} 项未启用`;
+  document.getElementById('runControl').dataset.state = latestStatus.state;
+  document.getElementById('queueSummary').textContent = busy ? '' : `待执行 ${count} 项`;
+  document.getElementById('runtimeDetails').hidden = !busy;
+  const counts = {
+    pending: tasks.filter(t => t.enabled && !t.is_completed_today).length,
+    done: tasks.filter(t => t.is_completed_today).length,
+    error: tasks.filter(t => t.last_success === false && !t.is_completed_today).length,
+  };
+  for (const [filter, label] of [['pending','待执行'],['done','已完成'],['error','异常']]) {
+    const button = document.querySelector(`[data-filter="${filter}"]`);
+    if (button) button.textContent = `${label} ${counts[filter]}`;
+  }
   document.querySelectorAll('[data-idle-only]').forEach(button => {
     const id = button.closest('.task-card')?.dataset.taskId;
     const edge = button.dataset.action === 'up' && id === tasks[0]?.id || button.dataset.action === 'down' && id === tasks[tasks.length - 1]?.id;
     button.disabled = !statusAvailable || busy || pendingActions.size > 0 || edge;
   });
+}
+
+function updateConnectionIndicator() {
+  const text = !statusAvailable ? '状态连接中断' : !logConnected ? '日志重连中' : '已连接';
+  document.getElementById('wsText').textContent = text;
+  document.getElementById('wsDot').className = statusAvailable && logConnected ? 'dot connected' : 'dot';
+  const refresh = document.getElementById('btnRefreshLogs');
+  if (refresh) refresh.hidden = !logScope && logConnected;
 }
 
 function renderStatus(data) {
@@ -319,10 +355,11 @@ async function fetchStatus() {
   try {
     renderStatus(await requestAPI('/api/v1/status'));
     updateSecurityHint();
-    document.getElementById('statusHealth').textContent = '实时同步';
+    applyTheme();
+    updateConnectionIndicator();
   } catch {
     statusAvailable = false;
-    document.getElementById('statusHealth').textContent = '状态同步失败 · 正在重试';
+    updateConnectionIndicator();
     updateControls();
   }
 };
@@ -334,13 +371,16 @@ function setTaskFilter(filter) {
     button.setAttribute('aria-pressed', button.dataset.filter === filter);
   });
   renderTaskList(cachedTasks);
+  document.getElementById('taskList').scrollTop = 0;
 }
 
 function renderTaskList(tasks) {
   const container = document.getElementById('taskList');
+  const previousScroll = container.scrollTop;
+  const openMenuID = container.querySelector('.task-more[open]')?.closest('.task-card')?.dataset.taskId;
   container.replaceChildren();
   document.getElementById('taskCount').textContent = `${tasks.length} 项任务`;
-  const visible = tasks.map((task, index) => ({ task, index })).filter(({task}) => taskFilter === 'all' || (taskFilter === 'pending' && task.enabled && !task.is_completed_today) || (taskFilter === 'error' && task.last_success === false && !task.is_completed_today));
+  const visible = tasks.map((task, index) => ({ task, index })).filter(({task}) => taskFilter === 'all' || (taskFilter === 'pending' && task.enabled && !task.is_completed_today) || (taskFilter === 'done' && task.is_completed_today) || (taskFilter === 'error' && task.last_success === false && !task.is_completed_today));
   if (!visible.length) {
     const empty = document.createElement('div');
     empty.className = 'empty-hint';
@@ -352,18 +392,18 @@ function renderTaskList(tasks) {
     const failed = t.last_success === false && !t.is_completed_today;
     const label = active ? stateLabels[latestStatus.state] || '执行中' : !t.enabled ? '未启用' : t.is_completed_today ? '今日已完成' : failed ? '执行失败' : '待执行';
     const card = document.createElement('article');
-    card.className = `task-card${active ? ' active' : ''}${!t.enabled ? ' disabled' : ''}`;
+    card.className = `task-card${active ? ' active' : ''}${!t.enabled ? ' disabled' : ''}${logScope === t.id ? ' selected-log' : ''}`;
     card.dataset.taskId = t.id;
     card.innerHTML = `<div class="task-top">
       <span class="task-index" title="拖动调整队列顺序">${String(index + 1).padStart(2, '0')}</span>
-      <div class="task-info"><div class="task-name">${escapeHtml(t.name || t.id)}</div><div class="task-sub">${t.is_maa ? 'MAA · ' + escapeHtml(t.maa_config_name || '默认预设') : '外部程序'} · 上次耗时 ${escapeHtml(t.last_duration || '—')}</div></div>
+      <div class="task-info"><div class="task-name" title="${escapeHtml(t.name || t.id)}">${escapeHtml(t.name || t.id)}</div><div class="task-sub">${t.is_maa ? 'MAA · ' + escapeHtml(t.maa_config_name || '默认预设') : '外部程序'} · ${t.last_duration ? '上次耗时 ' + escapeHtml(t.last_duration) : '尚未运行'}</div></div>
       <span class="task-state ${active ? 'running' : failed ? 'error' : t.is_completed_today ? 'done' : ''}">${label}</span>
       <label class="switch"><input type="checkbox" aria-label="参与队列：${escapeHtml(t.name || t.id)}" ${t.enabled ? 'checked' : ''}><span class="slider"></span></label>
     </div>
-    ${failed ? `<div class="task-error">${escapeHtml(t.last_error || '执行异常，请查看任务日志')}</div>` : ''}
-    <div class="task-footer"><span class="task-sub">${active ? '正在执行当前任务' : t.last_start_time ? '上次启动 ' + escapeHtml(t.last_start_time) : '尚无运行记录'}</span>
+    ${failed ? `<details class="task-error"><summary>${escapeHtml(t.last_error || '执行异常，请查看任务日志')}</summary><p>${escapeHtml(t.last_error || '执行异常，请查看任务日志')}</p></details>` : ''}
+    <div class="task-footer">
       <div class="task-actions"><button class="btn btn-secondary btn-sm" data-action="run" data-idle-only>运行</button><button class="btn btn-secondary btn-sm" data-action="config">配置</button><button class="btn btn-secondary btn-sm" data-action="logs">日志</button>
-      <details class="task-more"><summary class="btn btn-secondary btn-sm" aria-label="更多任务操作">•••</summary><div class="more-menu"><button data-action="edit">启动设置</button><button data-action="up" data-idle-only ${index === 0 ? 'disabled' : ''}>上移一位</button><button data-action="down" data-idle-only ${index === tasks.length - 1 ? 'disabled' : ''}>下移一位</button><button data-action="delete" style="color:#ffa5ae">删除任务</button></div></details></div></div>`;
+      <details class="task-more"><summary class="btn btn-secondary btn-sm" aria-label="更多任务操作">•••</summary><div class="more-menu"><div class="task-record">上次启动<br>${escapeHtml(t.last_start_time || '尚无记录')}</div><button data-action="edit">启动设置</button><button data-action="up" data-idle-only ${index === 0 ? 'disabled' : ''}>上移一位</button><button data-action="down" data-idle-only ${index === tasks.length - 1 ? 'disabled' : ''}>下移一位</button><button data-action="delete" style="color:var(--pill-err-text)">删除任务</button></div></details></div></div>`;
     card.querySelector('input').onchange = async event => {
       const checkbox = event.target;
       checkbox.disabled = true;
@@ -372,7 +412,10 @@ function renderTaskList(tasks) {
       checkbox.disabled = false;
     };
     const actions = { run: () => runSingleTask(t.id), config: () => t.is_maa ? openMAAConfigModal(t.id) : openTaskModal(t), logs: () => selectTaskLogs(t.id), edit: () => openTaskModal(t), up: () => moveTask(index,-1), down: () => moveTask(index,1), delete: () => deleteTaskByIndex(index) };
-    card.querySelectorAll('[data-action]').forEach(button => { button.onclick = () => { card.querySelector('details').open = false; actions[button.dataset.action](); }; });
+    const menu = card.querySelector('.task-more');
+    menu.open = openMenuID === t.id;
+    menu.addEventListener('toggle', () => positionMoreMenu(menu));
+    card.querySelectorAll('[data-action]').forEach(button => { button.onclick = () => { menu.open = false; actions[button.dataset.action](); }; });
     // Dragging starts on the handle only, preserving text selection and controls.
     const handle = card.querySelector('.task-index');
     handle.draggable = latestStatus.state === 'IDLE' && taskFilter === 'all';
@@ -388,13 +431,29 @@ function renderTaskList(tasks) {
     container.appendChild(card);
   });
   updateControls();
+  container.scrollTop = previousScroll;
   container.querySelectorAll('[data-action=up]').forEach(button => { if (button.closest('.task-card').dataset.taskId === tasks[0]?.id) button.disabled = true; });
   container.querySelectorAll('[data-action=down]').forEach(button => { if (button.closest('.task-card').dataset.taskId === tasks[tasks.length-1]?.id) button.disabled = true; });
 };
 
+// Fixed menus stay clear of the independently scrolling task list's edges.
+function positionMoreMenu(details) {
+  if (!details.open) return;
+  const menu = details.querySelector('.more-menu');
+  const anchor = details.querySelector('summary').getBoundingClientRect();
+  menu.style.position = 'fixed';
+  menu.style.left = `${Math.max(8, Math.min(anchor.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
+  const below = window.innerHeight - anchor.bottom - 8;
+  menu.style.top = `${Math.max(8, below >= menu.offsetHeight ? anchor.bottom + 4 : anchor.top - menu.offsetHeight - 4)}px`;
+}
+
 function switchMobileView(view) {
   document.getElementById('workspace').dataset.view = view;
   document.querySelectorAll('[data-mobile-view]').forEach(button => { button.classList.toggle('selected',button.dataset.mobileView === view); button.setAttribute('aria-pressed',button.dataset.mobileView === view); });
+  if (window.innerWidth <= 760) {
+    if (view === 'logs') renderWorkspaceLogs();
+    else document.querySelector('main').scrollTop = 0;
+  }
 }
 
 function entryMatches(entry) {
@@ -414,7 +473,9 @@ function createLogRow(entry) {
 
 function renderWorkspaceLogs() {
   const body = document.getElementById('terminalBody');
-  const oldScroll = body.scrollTop;
+  const mobile = window.innerWidth <= 760;
+  const scroller = mobile ? document.querySelector('main') : body;
+  const oldScroll = scroller.scrollTop;
   body.replaceChildren();
   const entries = logScope ? scopedLogEntries : logEntries;
   const filtered = entries.filter(entryMatches);
@@ -426,7 +487,9 @@ function renderWorkspaceLogs() {
     hint.textContent = entries.length ? '没有匹配的日志' : '暂无日志，运行任务后将在这里显示。'; body.appendChild(hint);
   }
   document.getElementById('logCount').textContent = `${filtered.length} / ${entries.length} 行${logScope ? ' · 最近一次运行 · 最多 1200 行' : ' · 最多保留 1200 行'}`;
-  body.scrollTop = autoScroll ? body.scrollHeight : oldScroll;
+  if (!mobile || document.getElementById('workspace').dataset.view === 'logs') {
+    scroller.scrollTop = autoScroll ? scroller.scrollHeight : oldScroll;
+  }
 }
 let scopedLogEntries = [];
 function appendLog(entry) {
@@ -449,6 +512,10 @@ function scheduleLogRender() {
 async function selectTaskLogs(id = '') {
   const version = ++logLoadVersion;
   logScope = id;
+  document.querySelectorAll('.task-card').forEach(card => {
+    card.classList.toggle('selected-log', !!id && card.dataset.taskId === id);
+  });
+  updateConnectionIndicator();
   document.getElementById('logTaskSelect').value = id;
   const task = cachedTasks.find(t => t.id === id);
   document.getElementById('logTitle').textContent = task ? task.name || task.id : '实时日志';
@@ -465,7 +532,14 @@ async function selectTaskLogs(id = '') {
 }
 const openTaskLogModal = selectTaskLogs;
 function clearLogs() { if(logScope) scopedLogEntries=[]; else logEntries=[]; renderWorkspaceLogs(); };
-function toggleAutoScroll() { autoScroll=!autoScroll; document.getElementById('btnAutoScroll').textContent=autoScroll?'跟随最新：开':'回到最新'; if(autoScroll) renderWorkspaceLogs(); };
+function updateLogFollowControls() {
+  const button = document.getElementById('btnAutoScroll');
+  button.textContent = autoScroll ? '跟随最新' : '已暂停';
+  button.setAttribute('aria-pressed', String(autoScroll));
+  document.getElementById('btnResumeLogs').hidden = autoScroll;
+}
+function resumeLogFollow() { autoScroll = true; updateLogFollowControls(); renderWorkspaceLogs(); }
+function toggleAutoScroll() { autoScroll = !autoScroll; updateLogFollowControls(); if(autoScroll) renderWorkspaceLogs(); }
 async function copyWorkspaceLogs() {
   const entries = (logScope ? scopedLogEntries : logEntries).filter(entryMatches);
   try { await navigator.clipboard.writeText(entries.map(entry => `[${entry.timestamp || ''}] ${entry.message || ''}`).join('\n')); notifyUser('已复制当前筛选日志'); }
@@ -526,6 +600,8 @@ async function clearAuthToken() {
 function openSettingsModal() {
   const chkLAN = document.getElementById('chkLANAccess');
   if (chkLAN) chkLAN.checked = !!latestStatus.lan_enabled;
+  const selTheme = document.getElementById('selTheme');
+  if (selTheme) selTheme.value = (latestStatus && latestStatus.theme) || 'auto';
   updateSecurityHint();
   document.getElementById('settingsModal').style.display = 'flex';
 };
@@ -539,6 +615,14 @@ async function updateLANAccess() {
   await performAction('lan', '/api/v1/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lan_enabled: chk.checked }) }, '局域网访问配置已保存');
   chk.disabled = false;
   updateSecurityHint();
+};
+
+async function updateThemeSetting() {
+  const sel = document.getElementById('selTheme');
+  sel.disabled = true;
+  await performAction('theme', '/api/v1/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: sel.value }) }, '界面主题已保存');
+  sel.disabled = false;
+  applyTheme();
 };
 
 // 局域网开启但未设密码时在设置中显示红字风险提醒
@@ -979,11 +1063,23 @@ window.addEventListener('DOMContentLoaded',()=>{
   document.getElementById('chkForceRun').addEventListener('change',updateControls);
   document.getElementById('terminalBody').addEventListener('scroll',event=>{
     const body=event.target;
-    if(body.scrollHeight-body.scrollTop-body.clientHeight>40 && autoScroll) { autoScroll=false;document.getElementById('btnAutoScroll').textContent='回到最新'; }
+    if(body.scrollHeight-body.scrollTop-body.clientHeight>40 && autoScroll) { autoScroll=false;updateLogFollowControls(); }
+  });
+  document.querySelector('main').addEventListener('scroll',event=>{
+    if(window.innerWidth > 760 || document.getElementById('workspace').dataset.view !== 'logs') return;
+    const body = event.target;
+    if(body.scrollHeight-body.scrollTop-body.clientHeight>40 && autoScroll) { autoScroll=false;updateLogFollowControls(); }
+  },{passive:true});
+  document.querySelectorAll('.task-more').forEach(menu => menu.addEventListener('toggle',()=>positionMoreMenu(menu)));
+  const closeMenus = () => document.querySelectorAll('.task-more[open]').forEach(menu => { menu.open = false; });
+  document.getElementById('taskList').addEventListener('scroll', closeMenus, { passive: true });
+  window.addEventListener('resize', () => { closeMenus(); scheduleLogRender(); });
+  document.addEventListener('click', event => {
+    document.querySelectorAll('.task-more[open]').forEach(menu => { if(!menu.contains(event.target)) menu.open=false; });
   });
   document.addEventListener('keydown',event=>{
     if(event.key!=='Escape') return;
-    for(const [id,close] of [['confirmModal',()=>finishConfirmation(false)],['fileBrowserModal',closeFileBrowser],['maaConfigModal',closeMAAConfigModal],['taskModal',closeTaskModal]]) {
+    for(const [id,close] of [['confirmModal',()=>finishConfirmation(false)],['settingsModal',closeSettingsModal],['fileBrowserModal',closeFileBrowser],['maaConfigModal',closeMAAConfigModal],['taskModal',closeTaskModal]]) {
       if(document.getElementById(id).style.display==='flex') { close();break; }
     }
   });
@@ -997,12 +1093,12 @@ window.addEventListener('DOMContentLoaded',()=>{
   });
   // Keep keyboard focus in the top dialog, including the nested file browser.
   let priorFocus = null;
-  const modalOrder = ['taskModal','maaConfigModal','fileBrowserModal','confirmModal'];
+  const modalOrder = ['taskModal','maaConfigModal','fileBrowserModal','settingsModal','confirmModal'];
   function activeModal() { return modalOrder.map(id=>document.getElementById(id)).filter(modal=>modal.style.display==='flex').pop(); }
   modalOrder.forEach(id=>{
     const modal = document.getElementById(id);
     modal.setAttribute('role','dialog'); modal.setAttribute('aria-modal','true');
-    modal.setAttribute('aria-label',id==='confirmModal'?'确认操作':id==='fileBrowserModal'?'选择文件或目录':id==='maaConfigModal'?'自动化配置':'任务配置');
+    modal.setAttribute('aria-label',id==='confirmModal'?'确认操作':id==='settingsModal'?'设置':id==='fileBrowserModal'?'选择文件或目录':id==='maaConfigModal'?'自动化配置':'任务配置');
     new MutationObserver(()=>{
       const active = activeModal();
       document.querySelector('main').inert = !!active;
