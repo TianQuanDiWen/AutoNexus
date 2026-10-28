@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"autonexus/internal/executor"
@@ -10,10 +12,18 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		// 允许局域网内所有设备访问（手机、平板、其他 PC）
+	CheckOrigin: wsCheckOrigin,
+}
+
+// wsCheckOrigin 仅允许同源或非浏览器客户端 (无 Origin) 建立 WebSocket 连接，
+// 防止恶意网页跨站连入并读走任务执行日志
+func wsCheckOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
 		return true
-	},
+	}
+	u, err := url.Parse(origin)
+	return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host)
 }
 
 // handleWSLogs 处理 WebSocket 日志订阅连接

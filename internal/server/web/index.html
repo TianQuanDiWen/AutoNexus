@@ -314,7 +314,7 @@
           <div id="cooldownSec" style="font-size:1.3rem; font-weight:700; color:#fbbf24;">0s</div>
         </div>
         <div id="waitScheduleBox" style="display:none; text-align:right;">
-          <span style="font-size:0.75rem; color:#fde68a;">等待日常刷新 (<span id="waitTargetTime">04:00</span>)</span>
+          <span style="font-size:0.75rem; color:#fde68a;">等待执行时间 (<span id="waitTargetTime">04:00</span>)</span>
           <div style="display:flex; align-items:center; gap:8px; justify-content:flex-end; margin-top:2px;">
             <div id="waitScheduleSec" style="font-size:1.2rem; font-weight:700; color:#fbbf24;">0s</div>
             <button class="btn btn-secondary btn-sm" style="padding:2px 8px; font-size:0.75rem;" onclick="skipWait()">⚡ 跳过</button>
@@ -350,7 +350,7 @@
       <div class="run-hint" id="runHint"></div>
       <div class="status-settings">
         <label><input type="checkbox" id="chkForceRun">包含今日已完成任务</label>
-        <div class="schedule-controls"><span>每日调度</span><label class="switch"><input type="checkbox" id="chkAutoSchedule" aria-label="开启每日自动调度" onchange="updateScheduleConfig()"><span class="slider"></span></label><input type="time" id="inpScheduleTime" class="form-input" aria-label="每日调度时间" value="04:05" onchange="updateScheduleConfig()"><span id="nextScheduleTip"></span></div>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="openSettingsModal()">⚙ 设置</button>
       </div>
     </div>
     <nav class="mobile-tabs" aria-label="工作区切换"><button class="filter-btn selected" data-mobile-view="tasks" aria-pressed="true" onclick="switchMobileView('tasks')">任务队列</button><button class="filter-btn" data-mobile-view="logs" aria-pressed="false" onclick="switchMobileView('logs')">运行日志</button></nav>
@@ -385,6 +385,32 @@
     </div>
   </main>
   <div id="toastRegion" class="toast-region"></div>
+  <div id="settingsModal" class="modal-overlay" style="z-index:140" onclick="if(event.target===this) closeSettingsModal()">
+    <div class="modal-card" style="max-width:480px">
+      <div class="modal-title">设置<button class="btn btn-secondary btn-sm" onclick="closeSettingsModal()">✕</button></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.06);">
+        <span>每日自动调度<small style="display:block;color:var(--text-muted);">每天到点自动启动整个任务队列；各任务自己的「每日最早执行时间」在任务的启动设置里单独配置，互不影响</small></span>
+        <span style="display:flex;align-items:center;gap:10px;"><label class="switch"><input type="checkbox" id="chkAutoSchedule" aria-label="开启每日自动调度" onchange="updateScheduleConfig()"><span class="slider"></span></label><input type="time" id="inpScheduleTime" class="form-input" aria-label="每日调度时间" value="04:05" onchange="updateScheduleConfig()"></span>
+      </div>
+      <div id="nextScheduleTip" style="min-height:18px;font-size:12px;color:var(--text-muted);padding-top:6px;"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;border-bottom:1px solid rgba(255,255,255,.06);">
+        <span>局域网访问<small style="display:block;color:var(--text-muted);">默认关闭，仅本机 (127.0.0.1) 可打开控制台；开启后同一 Wi-Fi 下的设备均可访问</small></span>
+        <label class="switch"><input type="checkbox" id="chkLANAccess" aria-label="开启局域网访问" onchange="updateLANAccess()"><span class="slider"></span></label>
+      </div>
+      <div style="padding:12px 0 0;">
+        <span>访问密码<small style="display:block;color:var(--text-muted);">其他设备打开页面时需输入；留空保存表示不设密码</small></span>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <input type="password" id="inpAuthToken" class="form-input" aria-label="设置访问密码" placeholder="至少 6 位，留空则不修改" autocomplete="new-password" style="flex:1;">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="updateAuthToken()">保存</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btnClearToken" onclick="clearAuthToken()" style="display:none;">清除</button>
+        </div>
+        <div id="authWarnLine" style="display:none;margin-top:8px;color:#f87171;font-size:12.5px;line-height:1.6;">⚠ 已开启局域网访问但未设置访问密码：同一网络下的任何设备都能打开并操作本控制台</div>
+        <div id="authSetHint" style="margin-top:6px;font-size:12px;color:var(--text-muted);"></div>
+      </div>
+      <div class="modal-footer"><button class="btn btn-secondary" onclick="closeSettingsModal()">关闭</button></div>
+    </div>
+  </div>
+
   <div id="confirmModal" class="modal-overlay" style="z-index:150" onclick="if(event.target===this) finishConfirmation(false)">
     <div class="modal-card" style="max-width:400px"><div class="modal-title">确认操作</div><p id="confirmMessage"></p><div class="modal-footer"><button class="btn btn-secondary" onclick="finishConfirmation(false)">取消</button><button class="btn btn-primary" onclick="finishConfirmation(true)">确认</button></div></div>
   </div>
@@ -458,8 +484,9 @@
           <input min="0" step="1" type="number" id="taskCooldownInput" class="form-input" value="8">
         </div>
         <div class="form-group">
-          <label class="form-label">每日日常刷新时刻 (HH:MM)</label>
+          <label class="form-label">每日最早执行时间 (HH:MM)</label>
           <input type="time" id="taskRefreshInput" class="form-input" value="04:00">
+          <small style="display:block;margin-top:4px;color:var(--text-muted);font-size:0.75rem;">该任务每天最早从此刻开始执行；到点前队列会静默等待</small>
         </div>
       </div>
 
@@ -559,7 +586,8 @@
     // WebSocket 保持与重连
     function connectWS() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${location.host}/ws/logs`;
+      // 浏览器 WebSocket 无法自定义请求头，访问令牌经查询参数传递 (getAuthToken 由 workspace.js 提供)
+      const url = `${proto}//${location.host}/ws/logs?token=${encodeURIComponent(getAuthToken())}`;
 
       ws = new WebSocket(url);
 

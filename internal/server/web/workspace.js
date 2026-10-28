@@ -14,7 +14,7 @@ let lastRenderedState = '';
 let statusAvailable = false;
 let logLoadVersion = 0;
 let confirmResolver = null;
-const stateLabels = { IDLE: '待命', PREPARE: '准备中', RUNNING: '运行中', COOLING: '冷却中', STOPPING: '正在停止', WAITING_SCHEDULE: '等待日常刷新' };
+const stateLabels = { IDLE: '待命', PREPARE: '准备中', RUNNING: '运行中', COOLING: '冷却中', STOPPING: '正在停止', WAITING_SCHEDULE: '等待执行时间' };
 
 function escapeHtml(str) {
   if (!str) return '';
@@ -24,6 +24,54 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// ---- 访问密码：本机回环请求服务端免密放行；其他设备首次输入后缓存到 localStorage，之后自动携带 ----
+const TOKEN_KEY = 'autonexus_token';
+function getAuthToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
+}
+function showAuthGate() {
+  try {
+    if (document.getElementById('authGate')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'authGate';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(10,12,20,.97);display:flex;align-items:center;justify-content:center;padding:24px;';
+    overlay.innerHTML = '<div style="width:min(92vw,380px);background:#161a26;border:1px solid #2a3042;border-radius:14px;padding:28px;color:#e5e7eb;text-align:center;">'
+      + '<div style="font-size:18px;font-weight:600;margin-bottom:6px;">访问验证</div>'
+      + '<div style="font-size:13px;color:#9aa3b5;margin-bottom:18px;line-height:1.7;">输入访问密码进入控制台</div>'
+      + '<input id="authGateInput" type="password" placeholder="访问密码" autocomplete="current-password" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #2a3042;background:#0d101a;color:#e5e7eb;font-size:14px;outline:none;">'
+      + '<div id="authGateError" style="min-height:18px;font-size:12px;color:#f87171;margin:8px 0;"></div>'
+      + '<button id="authGateSubmit" style="width:100%;padding:10px;border:none;border-radius:8px;background:#3b82f6;color:#fff;font-size:14px;cursor:pointer;">进入控制台</button>'
+      + '</div>';
+    (document.body || document.documentElement).appendChild(overlay);
+    const input = document.getElementById('authGateInput');
+    const btn = document.getElementById('authGateSubmit');
+    const showError = msg => { const el = document.getElementById('authGateError'); if (el) el.textContent = msg; };
+    async function submit() {
+      const candidate = (input.value || '').trim();
+      if (!candidate) return;
+      btn.disabled = true;
+      btn.textContent = '验证中...';
+      try {
+        // 用候选密码直接请求状态接口完成验证，通过后缓存到本地等效于配对
+        const res = await fetch('/api/v1/status', { headers: { 'Authorization': 'Bearer ' + candidate } });
+        if (res.ok) {
+          try { localStorage.setItem(TOKEN_KEY, candidate); } catch (e) {}
+          location.reload();
+          return;
+        }
+        showError(res.status === 401 ? '密码不正确，请重试' : `验证失败 (${res.status})`);
+      } catch (e) {
+        showError('网络错误，请重试');
+      }
+      btn.disabled = false;
+      btn.textContent = '进入控制台';
+    }
+    btn.addEventListener('click', submit);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+    if (input.focus) input.focus();
+  } catch (e) { /* 测试环境无完整 DOM */ }
 }
 
 function formatCommandLine(args) {
@@ -137,9 +185,15 @@ function finishConfirmation(accepted) {
 }
 
 async function requestAPI(url, options = {}) {
+  const token = getAuthToken();
+  if (token) {
+    options = Object.assign({}, options);
+    options.headers = Object.assign({}, options.headers, { 'Authorization': 'Bearer ' + token });
+  }
   const response = await fetch(url, options);
   let data;
   try { data = await response.json(); } catch { data = {}; }
+  if (response.status === 401) showAuthGate();
   if (!response.ok) throw new Error(data.error || `请求失败 (${response.status})`);
   return data;
 }
@@ -264,6 +318,7 @@ function renderStatus(data) {
 async function fetchStatus() {
   try {
     renderStatus(await requestAPI('/api/v1/status'));
+    updateSecurityHint();
     document.getElementById('statusHealth').textContent = '实时同步';
   } catch {
     statusAvailable = false;
@@ -433,6 +488,71 @@ async function updateScheduleConfig() {
   await performAction('schedule','/api/v1/schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({schedule_enabled:controls[0].checked,schedule_time:controls[1].value || '04:05'})},'每日调度已保存');
   controls.forEach(input=>input.disabled=false);
 };
+
+async function updateAuthToken() {
+  const input = document.getElementById('inpAuthToken');
+  const token = (input.value || '').trim();
+  if (token && token.length < 6) { notifyUser('访问密码至少需要 6 位', true); return; }
+  if (!token) { notifyUser('请输入新密码；如需取消密码请点「清除」', true); return; }
+  input.disabled = true;
+  try {
+    await requestAPI('/api/v1/auth/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+    // 本机立即切换到新密码，避免下一次请求 401
+    try { localStorage.setItem(TOKEN_KEY, token); } catch (e) {}
+    input.value = '';
+    notifyUser('访问密码已更新，其他设备需重新验证');
+    await fetchStatus();
+  } catch (error) {
+    notifyUser(error.message || '保存失败，请重试', true);
+  } finally {
+    input.disabled = false;
+    updateSecurityHint();
+  }
+};
+
+async function clearAuthToken() {
+  if (!(await confirmAction('确定清除访问密码？清除后局域网内所有设备都可直接访问本控制台。'))) return;
+  try {
+    await requestAPI('/api/v1/auth/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: '' }) });
+    try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+    notifyUser('访问密码已清除');
+    await fetchStatus();
+  } catch (error) {
+    notifyUser(error.message || '操作失败，请重试', true);
+  }
+  updateSecurityHint();
+};
+
+function openSettingsModal() {
+  const chkLAN = document.getElementById('chkLANAccess');
+  if (chkLAN) chkLAN.checked = !!latestStatus.lan_enabled;
+  updateSecurityHint();
+  document.getElementById('settingsModal').style.display = 'flex';
+};
+function closeSettingsModal() {
+  document.getElementById('settingsModal').style.display = 'none';
+};
+
+async function updateLANAccess() {
+  const chk = document.getElementById('chkLANAccess');
+  chk.disabled = true;
+  await performAction('lan', '/api/v1/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lan_enabled: chk.checked }) }, '局域网访问配置已保存');
+  chk.disabled = false;
+  updateSecurityHint();
+};
+
+// 局域网开启但未设密码时在设置中显示红字风险提醒
+function updateSecurityHint() {
+  const warn = document.getElementById('authWarnLine');
+  if (!warn) return;
+  const lanOn = !!(latestStatus && latestStatus.lan_enabled);
+  const hasPassword = !!(latestStatus && latestStatus.auth_token_set);
+  warn.style.display = lanOn && !hasPassword ? 'block' : 'none';
+  const hint = document.getElementById('authSetHint');
+  if (hint) hint.textContent = hasPassword ? '已设置访问密码' : '未设置访问密码';
+  const clearBtn = document.getElementById('btnClearToken');
+  if (clearBtn) clearBtn.style.display = hasPassword ? '' : 'none';
+}
 
 function formSnapshot(id) {
   return JSON.stringify([...document.querySelectorAll(`#${id} input, #${id} select`)].map(input=>[input.id,input.type==='checkbox'?input.checked:input.value]));

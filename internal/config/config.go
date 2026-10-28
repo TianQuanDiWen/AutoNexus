@@ -38,6 +38,8 @@ type TaskConfig struct {
 type Config struct {
 	Host            string        `json:"host"`             // 监听地址，默认 0.0.0.0 供局域网访问
 	Port            int           `json:"port"`             // 监听端口，默认 18080
+	LANEnabled      bool          `json:"lan_enabled"`      // 局域网访问开关；关闭后仅本机 (127.0.0.1) 可打开控制台
+	AuthToken       string        `json:"auth_token"`       // 访问密码；留空表示不设密码 (局域网开启时界面会红字提醒)
 	ScheduleEnabled bool          `json:"schedule_enabled"` // 是否开启每日自动定时调度
 	ScheduleTime    string        `json:"schedule_time"`    // 每日自动调度启动时间 (如 "04:05")
 	Tasks           []*TaskConfig `json:"tasks"`            // 任务列表（按调度顺序排列）
@@ -48,6 +50,8 @@ func DefaultConfig() *Config {
 	return &Config{
 		Host:            "0.0.0.0",
 		Port:            18080,
+		LANEnabled:      false, // 默认仅本机可访问控制台，局域网访问需在设置中显式开启
+		AuthToken:       "",
 		ScheduleEnabled: false,
 		ScheduleTime:    "04:05",
 		Tasks:           []*TaskConfig{},
@@ -87,6 +91,7 @@ func (m *Manager) loadOrCreate() error {
 	}
 
 	var cfg Config
+	// 布尔开关字段在 JSON 缺失时保持零值，即默认仅本机访问；显式写入的 true/false 正常生效
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("parse config json error: %w", err)
 	}
@@ -124,6 +129,8 @@ func (m *Manager) Get() Config {
 	return Config{
 		Host:            m.cfg.Host,
 		Port:            m.cfg.Port,
+		LANEnabled:      m.cfg.LANEnabled,
+		AuthToken:       m.cfg.AuthToken,
 		ScheduleEnabled: m.cfg.ScheduleEnabled,
 		ScheduleTime:    m.cfg.ScheduleTime,
 		Tasks:           tasksCopy,
@@ -148,6 +155,24 @@ func (m *Manager) UpdateSchedule(enabled bool, scheduleTime string) error {
 	if scheduleTime != "" {
 		m.cfg.ScheduleTime = scheduleTime
 	}
+	return m.saveLocked()
+}
+
+// UpdateAuthToken 更新访问密码并落盘，传空串表示清除密码 (免密访问)
+func (m *Manager) UpdateAuthToken(token string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.cfg.AuthToken = token
+	return m.saveLocked()
+}
+
+// UpdateLANEnabled 更新局域网访问开关并落盘
+func (m *Manager) UpdateLANEnabled(enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.cfg.LANEnabled = enabled
 	return m.saveLocked()
 }
 

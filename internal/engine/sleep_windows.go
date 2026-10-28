@@ -5,7 +5,7 @@ package engine
 import "golang.org/x/sys/windows"
 
 var (
-	kernel32                     = windows.NewLazySystemDLL("kernel32.dll")
+	kernel32                    = windows.NewLazySystemDLL("kernel32.dll")
 	procSetThreadExecutionState = kernel32.NewProc("SetThreadExecutionState")
 )
 

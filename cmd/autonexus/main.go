@@ -59,12 +59,14 @@ func main() {
 	// 3. 构建 HTTP 监听
 	listenAddr := fmt.Sprintf("%s:%d", cfg.Host, port)
 	httpServer := &http.Server{
-		Addr:    listenAddr,
-		Handler: srv.Handler(),
+		Addr:              listenAddr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// 4. 打印欢迎面板与局域网 IP 提示
-	printBanner(port)
+	printBanner(port, &cfg)
 
 	// 5. 启动 HTTP 服务
 	go func() {
@@ -77,7 +79,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	lanURL := getPrimaryLANURL(port)
+	// 局域网访问关闭时不提供局域网地址 (托盘也隐藏复制入口)；本机桌面窗口走回环地址，始终免密直达
+	lanURL := ""
+	if cfg.LANEnabled {
+		lanURL = getPrimaryLANURL(port)
+	}
 
 	if *noUI {
 		// 纯后台模式：阻塞等待系统信号
@@ -143,22 +149,30 @@ func getPrimaryLANURL(port int) string {
 	return ""
 }
 
-func printBanner(port int) {
+func printBanner(port int, cfg *config.Config) {
 	fmt.Println("==================================================")
 	fmt.Println("      ⚡ AutoNexus 自动化任务批量调度总控服务      ")
 	fmt.Println("==================================================")
 	fmt.Printf(" 本地访问:    http://127.0.0.1:%d\n", port)
 
-	// 扫描可用局域网 IPv4
-	addrs, err := net.InterfaceAddrs()
-	if err == nil {
-		for _, addr := range addrs {
-			if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
-				if ipNet.IP.To4() != nil {
-					fmt.Printf(" 局域网手机:  http://%s:%d\n", ipNet.IP.String(), port)
+	if cfg.LANEnabled {
+		// 扫描可用局域网 IPv4
+		addrs, err := net.InterfaceAddrs()
+		if err == nil {
+			for _, addr := range addrs {
+				if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+					if ipNet.IP.To4() != nil {
+						fmt.Printf(" 局域网访问:  http://%s:%d\n", ipNet.IP.String(), port)
+					}
 				}
 			}
 		}
+		if cfg.AuthToken == "" {
+			fmt.Println(" ⚠ 安全提醒:  局域网访问已开放且未设置访问密码，建议在网页「设置」中配置")
+		}
+		fmt.Println(" 提示: 手机或平板处于同一 Wi-Fi 下直接浏览器打开即可")
+	} else {
+		fmt.Println(" 局域网访问:  已关闭 (仅本机可打开控制台)")
 	}
 	fmt.Println("--------------------------------------------------")
 	if IsAdmin() {
@@ -166,7 +180,6 @@ func printBanner(port int) {
 	} else {
 		fmt.Println(" 运行权限:    [普通权限] (如子任务需提权可能被 UAC 拦截)")
 	}
-	fmt.Println(" 提示: 手机或平板处于同一 Wi-Fi 下直接浏览器打开即可")
 	fmt.Println(" 控制: 支持桌面独立窗口与右下角托盘常驻，按 Ctrl+C 安全退出")
 	fmt.Println("==================================================")
 }

@@ -7,6 +7,44 @@ import (
 	"time"
 )
 
+func TestDefaultConfigLocalOnly(t *testing.T) {
+	// 默认配置：仅本机访问 + 未设密码
+	def := DefaultConfig()
+	if def.LANEnabled {
+		t.Fatal("Expected LAN access to be disabled by default")
+	}
+	if def.AuthToken != "" {
+		t.Fatal("Expected empty auth password by default")
+	}
+
+	// 旧配置文件缺少 lan_enabled 字段时，按默认关闭处理
+	tempDir := t.TempDir()
+	cfgPath := filepath.Join(tempDir, "config.json")
+	legacy := `{"host":"0.0.0.0","port":18080,"tasks":[]}`
+	if err := os.WriteFile(cfgPath, []byte(legacy), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	mgr, err := NewManager(cfgPath)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	if mgr.Get().LANEnabled {
+		t.Fatal("Expected LAN access to default to disabled for legacy config without lan_enabled")
+	}
+
+	// 显式写入的值覆盖默认：开启局域网并持久化后重读仍为开
+	if err := mgr.UpdateLANEnabled(true); err != nil {
+		t.Fatalf("UpdateLANEnabled failed: %v", err)
+	}
+	mgr2, err := NewManager(cfgPath)
+	if err != nil {
+		t.Fatalf("NewManager reload failed: %v", err)
+	}
+	if !mgr2.Get().LANEnabled {
+		t.Fatal("Expected LAN access to persist as enabled after reload")
+	}
+}
+
 func TestDailyCycleCalculations(t *testing.T) {
 	loc := time.Local
 

@@ -1,13 +1,18 @@
 package server
 
 import (
+	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"autonexus/internal/config"
 	"autonexus/internal/engine"
@@ -30,6 +35,8 @@ type Server struct {
 	engine      *engine.Engine
 	broadcaster *executor.Broadcaster
 	mux         *http.ServeMux
+	authMu      sync.Mutex
+	authFails   int // 连续认证失败次数（访问密码可能为弱口令，用于拖慢爆破）
 }
 
 // NewServer 创建 Web 服务实例并挂载路由
@@ -45,9 +52,116 @@ func NewServer(cfgMgr *config.Manager, eng *engine.Engine, b *executor.Broadcast
 	return s
 }
 
-// Handler 返回 HTTP 处理器
+// Handler 返回 HTTP 处理器（外层包裹局域网访问令牌校验）
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return s.withAuthToken(s.mux)
+}
+
+// isPublicPath 静态页面壳不含任何敏感数据，放行以支持手机首次通过配对链接打开；API 与 WebSocket 一律校验令牌
+func isPublicPath(p string) bool {
+	return p == "/" || strings.HasPrefix(p, "/assets/")
+}
+
+// withAuthToken 访问控制中间件，判定顺序：
+//  0. 状态变更请求先过同源校验 (在回环豁免之前) —— 本机浏览器里的恶意网页向 127.0.0.1
+//     发 no-cors POST 恰好满足「回环来源+回环 Host」，若不过此关可免密改配置/创建任务；
+//  1. 本机请求 (127.0.0.1/::1) 永远放行 —— 桌面窗口与宿主机浏览器是物理可控的可信位置；
+//  2. 局域网开关关闭时拒绝一切外部访问；
+//  3. 未设置访问密码时开放 (设置界面会红字提醒风险)；
+//  4. 已设密码时校验 Bearer 头 / token 查询参数 (浏览器 WebSocket 无法自定义请求头)。
+func (s *Server) withAuthToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !sameOriginRequest(r) {
+			s.writeError(w, http.StatusForbidden, "跨站请求被拒绝")
+			return
+		}
+		if isLoopbackRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		cfg := s.configMgr.Get()
+		if !cfg.LANEnabled {
+			s.writeError(w, http.StatusForbidden, "局域网访问已关闭，请在电脑端控制台的设置中开启")
+			return
+		}
+		if cfg.AuthToken == "" || isPublicPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 访问密码可能为用户自设的弱口令：使用常量时间比较消除时序侧信道
+		if subtle.ConstantTimeCompare([]byte(requestToken(r)), []byte(cfg.AuthToken)) == 1 {
+			s.recordAuthResult(true)
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 访问密码可能为用户自设的弱口令：连续失败达到阈值后每次失败延迟响应，拖慢局域网内的爆破尝试
+		if s.recordAuthResult(false) >= 5 {
+			time.Sleep(2 * time.Second)
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="autonexus"`)
+		s.writeError(w, http.StatusUnauthorized, "访问密码错误或缺失，请在打开的页面中输入访问密码")
+	})
+}
+
+// sameOriginRequest 校验状态变更请求的来源：浏览器对 POST/PUT/DELETE 恒携带 Origin，
+// 同源请求的 Origin 主机部分必然等于 r.Host (本机浏览器与回环、局域网手机与自身地址皆然)；
+// 非浏览器客户端 (curl/脚本) 不携带 Origin，凭据校验由后续鉴权逻辑兜底
+func sameOriginRequest(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host)
+}
+
+// isLoopbackRequest 判断请求是否为本机可信请求：来源地址与 Host 头必须同为回环。
+// 仅看 RemoteAddr 会留下 DNS rebinding 面——恶意网页把域名解析到 127.0.0.1 后，
+// 请求虽来自回环但 Host 仍是攻击者域名，不能享受免密豁免。
+func isLoopbackRequest(r *http.Request) bool {
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		remoteHost = r.RemoteAddr
+	}
+	ip := net.ParseIP(remoteHost)
+	if ip == nil || !ip.IsLoopback() {
+		return false
+	}
+
+	reqHost := r.Host
+	if h, _, err := net.SplitHostPort(r.Host); err == nil {
+		reqHost = h
+	}
+	reqHost = strings.ToLower(strings.Trim(reqHost, "[]"))
+	if reqHost == "localhost" {
+		return true
+	}
+	hostIP := net.ParseIP(reqHost)
+	return hostIP != nil && hostIP.IsLoopback()
+}
+
+// recordAuthResult 记录认证结果：成功清零连续失败计数并返回 0，失败自增并返回当前连续失败次数
+func (s *Server) recordAuthResult(success bool) int {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	if success {
+		s.authFails = 0
+		return 0
+	}
+	s.authFails++
+	return s.authFails
+}
+
+// requestToken 提取访问令牌：优先 Authorization: Bearer 请求头；浏览器 WebSocket 无法自定义请求头，故同时接受 token 查询参数
+func requestToken(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+	}
+	return r.URL.Query().Get("token")
 }
 
 func (s *Server) setupRoutes() {
@@ -57,6 +171,8 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("POST /api/v1/queue/stop", s.handleStopQueue)
 	s.mux.HandleFunc("POST /api/v1/queue/skip-wait", s.handleSkipWait)
 	s.mux.HandleFunc("POST /api/v1/schedule", s.handleUpdateSchedule)
+	s.mux.HandleFunc("POST /api/v1/settings", s.handleUpdateSettings)
+	s.mux.HandleFunc("POST /api/v1/auth/token", s.handleUpdateAuthToken)
 	s.mux.HandleFunc("POST /api/v1/tasks", s.handleCreateTask)
 	s.mux.HandleFunc("PUT /api/v1/tasks/{id}", s.handleUpdateTask)
 	s.mux.HandleFunc("DELETE /api/v1/tasks/{id}", s.handleDeleteTask)
@@ -153,6 +269,54 @@ func (s *Server) handleUpdateSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	s.engine.NotifyScheduleChanged()
 	s.writeJSON(w, http.StatusOK, map[string]string{"message": "定时调度配置已更新"})
+}
+
+// handleUpdateSettings 更新局域网访问等通用设置
+func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		LANEnabled *bool `json:"lan_enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "解析请求参数失败")
+		return
+	}
+	if req.LANEnabled != nil {
+		if err := s.configMgr.UpdateLANEnabled(*req.LANEnabled); err != nil {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]string{"message": "设置已保存"})
+}
+
+// handleUpdateAuthToken 设置自定义访问密码；传空串表示清除密码回到免密访问
+func (s *Server) handleUpdateAuthToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "解析请求参数失败")
+		return
+	}
+	req.Token = strings.TrimSpace(req.Token)
+	if req.Token == "" {
+		if err := s.configMgr.UpdateAuthToken(""); err != nil {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.writeJSON(w, http.StatusOK, map[string]string{"message": "访问密码已清除，所有设备可直接访问"})
+		return
+	}
+	// 按字符数而非字节数校验，与界面文案「6~128 位」语义一致 (UTF-8 下一个汉字占 3 字节)
+	if n := len([]rune(req.Token)); n < 6 || n > 128 {
+		s.writeError(w, http.StatusBadRequest, "访问密码长度需在 6~128 个字符之间")
+		return
+	}
+	if err := s.configMgr.UpdateAuthToken(req.Token); err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]string{"message": "访问密码已更新，其他设备需重新验证"})
 }
 
 func (s *Server) handleRunTask(w http.ResponseWriter, r *http.Request) {

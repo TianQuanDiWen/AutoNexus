@@ -37,6 +37,8 @@ type StatusSnapshot struct {
 	ScheduleEnabled       bool                   `json:"schedule_enabled"`
 	ScheduleTime          string                 `json:"schedule_time"`
 	ScheduleNextRun       string                 `json:"schedule_next_run,omitempty"`
+	LANEnabled            bool                   `json:"lan_enabled"`
+	AuthTokenSet          bool                   `json:"auth_token_set"` // 是否已设置访问密码 (与局域网开关解耦，避免界面误判)
 	Tasks                 []*config.TaskConfig   `json:"tasks"`
 	LastResults           []*executor.TaskResult `json:"last_results"`
 }
@@ -142,6 +144,8 @@ func (e *Engine) GetStatus() StatusSnapshot {
 		ScheduleEnabled:       cfg.ScheduleEnabled,
 		ScheduleTime:          cfg.ScheduleTime,
 		ScheduleNextRun:       nextRunStr,
+		LANEnabled:            cfg.LANEnabled,
+		AuthTokenSet:          cfg.AuthToken != "",
 		Tasks:                 tasksCopy,
 		LastResults:           resultsCopy,
 	}
