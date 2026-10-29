@@ -11,11 +11,13 @@ function workspace(fetch = async () => ({ ok: true, json: async () => ({}) })) {
     renderStatus() {}, openTaskModal() {}, saveTaskFromModal() {},
     closeMAAConfigModal() {}, loadMAAConfig() {}, onMAAProfileChange() {},
     window: { addEventListener() {} },
+    setTimeout() {},
     document: {
       getElementById(id) {
-        if (!elements.has(id)) elements.set(id, { style: { display: 'flex' }, dataset: {}, textContent: '', setAttribute(name,value) { this[name] = value; } });
+        if (!elements.has(id)) elements.set(id, { style: { display: 'flex' }, dataset: {}, textContent: '', setAttribute(name,value) { this[name] = value; }, appendChild() {} });
         return elements.get(id);
       },
+      createElement() { return { className: '', dataset: {}, textContent: '', setAttribute() {}, appendChild() {}, remove() {} }; },
       querySelector(selector) { return this.getElementById(selector); },
       querySelectorAll() { return []; },
     },
@@ -135,4 +137,44 @@ test('formatCommandLine and parseCommandLine roundtrip preserve arguments with s
     const parsed = context.parseCommandLine(formatted);
     assert.deepEqual([...parsed], original, `Roundtrip failed for: ${JSON.stringify(original)} -> formatted as: ${formatted}`);
   }
+});
+
+test('updateLANAccess restores the switch when saving fails', async () => {
+  let calls = 0;
+  const { context } = workspace(async () => {
+    calls++;
+    if (calls === 1) return { ok: false, status: 500, json: async () => ({ error: '落盘失败' }) };
+    return { ok: true, json: async () => ({}) };
+  });
+  const chk = context.document.getElementById('chkLANAccess');
+  chk.checked = true;
+  await context.updateLANAccess();
+  assert.equal(chk.checked, false, 'switch should roll back to the server value');
+  assert.equal(chk.disabled, false, 'switch should be re-enabled');
+  assert.equal(calls, 1, 'status should not be re-fetched after a failed save');
+});
+
+test('updateLANAccess keeps the new value when saving succeeds', async () => {
+  const { context } = workspace(async () => ({ ok: true, json: async () => ({}) }));
+  const chk = context.document.getElementById('chkLANAccess');
+  chk.checked = true;
+  await context.updateLANAccess();
+  assert.equal(chk.checked, true, 'switch should keep the saved value');
+  assert.equal(chk.disabled, false);
+});
+
+test('updateThemeSetting restores the selection when saving fails', async () => {
+  let calls = 0;
+  const { context } = workspace(async () => {
+    calls++;
+    if (calls === 1) return { ok: false, status: 500, json: async () => ({ error: '落盘失败' }) };
+    return { ok: true, json: async () => ({}) };
+  });
+  const sel = context.document.getElementById('selTheme');
+  sel.value = 'auto';
+  sel.value = 'light';
+  await context.updateThemeSetting();
+  assert.equal(sel.value, 'auto', 'selection should roll back to the server theme');
+  assert.equal(sel.disabled, false, 'select should be re-enabled');
+  assert.equal(calls, 1, 'status should not be re-fetched after a failed save');
 });

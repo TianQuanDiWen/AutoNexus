@@ -612,17 +612,34 @@ function closeSettingsModal() {
 async function updateLANAccess() {
   const chk = document.getElementById('chkLANAccess');
   chk.disabled = true;
-  await performAction('lan', '/api/v1/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lan_enabled: chk.checked }) }, '局域网访问配置已保存');
-  chk.disabled = false;
-  updateSecurityHint();
+  try {
+    await requestAPI('/api/v1/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lan_enabled: chk.checked }) });
+    notifyUser('局域网访问配置已保存');
+    await fetchStatus();
+  } catch (error) {
+    // 保存失败把开关还原为服务端当前值，避免界面与服务端状态不一致
+    chk.checked = !!(latestStatus && latestStatus.lan_enabled);
+    notifyUser(error.message || '保存失败，已还原开关状态', true);
+  } finally {
+    chk.disabled = false;
+    updateSecurityHint();
+  }
 };
 
 async function updateThemeSetting() {
   const sel = document.getElementById('selTheme');
   sel.disabled = true;
-  await performAction('theme', '/api/v1/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: sel.value }) }, '界面主题已保存');
-  sel.disabled = false;
-  applyTheme();
+  try {
+    await requestAPI('/api/v1/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: sel.value }) });
+    notifyUser('界面主题已保存');
+    await fetchStatus();
+  } catch (error) {
+    // onchange 触发时选择值已变，失败时还原为服务端当前生效的主题
+    sel.value = (latestStatus && latestStatus.theme) || 'auto';
+    notifyUser(error.message || '保存失败，已还原主题选择', true);
+  } finally {
+    sel.disabled = false;
+  }
 };
 
 // 局域网开启但未设密码时在设置中显示红字风险提醒

@@ -169,8 +169,14 @@ func (m *Manager) UpdateAuthToken(token string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	previous := m.cfg.AuthToken
 	m.cfg.AuthToken = token
-	return m.saveLocked()
+	if err := m.saveLocked(); err != nil {
+		// 落盘失败必须回滚内存状态，避免内存与文件不一致导致鉴权判断漂移
+		m.cfg.AuthToken = previous
+		return err
+	}
+	return nil
 }
 
 // UpdateLANEnabled 更新局域网访问开关并落盘

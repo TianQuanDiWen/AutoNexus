@@ -290,4 +290,3 @@ func KillProcessesByName(processNames []string) []string {
 	}
 	return killed
 }
-

@@ -8,7 +8,7 @@ import "errors"
 type Config struct {
 	Title       string
 	URL         string
-	LANURL      string
+	OnLANURL    func() string
 	Width       uint
 	Height      uint
 	Debug       bool

@@ -299,3 +299,67 @@ func TestUpdateTaskMAABindingUsesEffectiveWorkingDir(t *testing.T) {
 		}
 	})
 }
+
+// TestUpdateSettingsRollbackOnSaveFailure 落盘失败时内存设置必须回滚，避免内存与文件不一致
+func TestUpdateSettingsRollbackOnSaveFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	cfgPath := filepath.Join(tempDir, "config.json")
+	mgr, err := NewManager(cfgPath)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	// 先写入基线状态
+	if err := mgr.UpdateAuthToken("old-pass-1"); err != nil {
+		t.Fatalf("seed auth token failed: %v", err)
+	}
+
+	// 令配置文件只读，模拟落盘失败
+	if err := os.Chmod(cfgPath, 0444); err != nil {
+		t.Fatalf("Chmod failed: %v", err)
+	}
+	defer func() {
+		if err := os.Chmod(cfgPath, 0644); err != nil {
+			t.Fatalf("restore chmod failed: %v", err)
+		}
+	}()
+
+	// 1. 访问密码：保存失败必须报错且内存回滚
+	if err := mgr.UpdateAuthToken("new-pass-2"); err == nil {
+		t.Fatal("Expected error when config file is read-only")
+	}
+	if got := mgr.Get().AuthToken; got != "old-pass-1" {
+		t.Fatalf("Expected auth token rollback to old-pass-1, got %q", got)
+	}
+
+	// 2. 局域网开关：同样回滚
+	if err := mgr.UpdateLANEnabled(true); err == nil {
+		t.Fatal("Expected error when config file is read-only")
+	}
+	if mgr.Get().LANEnabled {
+		t.Fatal("Expected LANEnabled rollback to false")
+	}
+
+	// 3. 主题：同样回滚
+	if err := mgr.UpdateTheme("light"); err == nil {
+		t.Fatal("Expected error when config file is read-only")
+	}
+	if got := mgr.Get().Theme; got != "auto" {
+		t.Fatalf("Expected theme rollback to auto, got %q", got)
+	}
+
+	// 恢复可写后重试成功，且落盘内容与新值一致
+	if err := os.Chmod(cfgPath, 0644); err != nil {
+		t.Fatalf("restore writable failed: %v", err)
+	}
+	if err := mgr.UpdateAuthToken("new-pass-2"); err != nil {
+		t.Fatalf("retry after chmod failed: %v", err)
+	}
+	reloaded, err := NewManager(cfgPath)
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if got := reloaded.Get().AuthToken; got != "new-pass-2" {
+		t.Fatalf("Expected persisted token new-pass-2, got %q", got)
+	}
+}

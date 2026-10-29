@@ -79,12 +79,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	// 局域网访问关闭时不提供局域网地址 (托盘也隐藏复制入口)；本机桌面窗口走回环地址，始终免密直达
-	lanURL := ""
-	if cfg.LANEnabled {
-		lanURL = getPrimaryLANURL(port)
-	}
-
 	if *noUI {
 		// 纯后台模式：阻塞等待系统信号
 		<-ctx.Done()
@@ -96,10 +90,17 @@ func main() {
 		}()
 
 		dCfg := desktop.Config{
-			Title:  "AutoNexus 自动化总控平台",
-			URL:    fmt.Sprintf("http://127.0.0.1:%d", port),
-			LANURL: lanURL,
-			Theme:  cfg.Theme,
+			Title: "AutoNexus 自动化总控平台",
+			URL:   fmt.Sprintf("http://127.0.0.1:%d", port),
+			Theme: cfg.Theme,
+			// 托盘每次弹出菜单时实时读取配置：运行时切换局域网开关即刻反映到地址入口显隐
+			OnLANURL: func() string {
+				c := cfgMgr.Get()
+				if !c.LANEnabled {
+					return ""
+				}
+				return getPrimaryLANURL(port)
+			},
 			Width:  1300,
 			Height: 840,
 			Debug:  *debugUI,

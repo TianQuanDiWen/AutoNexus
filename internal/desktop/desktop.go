@@ -16,15 +16,15 @@ import (
 
 // Config 桌面窗口与系统托盘初始化配置
 type Config struct {
-	Title       string // 窗口标题
-	URL         string // 本地访问地址
-	LANURL      string // 局域网访问地址 (用于一键复制到剪贴板)
-	Width       uint   // 初始宽度
-	Height      uint   // 初始高度
-	Debug       bool   // 是否启用开发者工具
-	Theme       string // 界面主题: auto(跟随系统)/dark/light
-	OnStopQueue func() // 托盘菜单“急停所有任务”回调
-	OnExit      func() // 托盘菜单“彻底退出”回调
+	Title       string        // 窗口标题
+	URL         string        // 本地访问地址
+	OnLANURL    func() string // 返回当前局域网访问地址，未开启局域网时返回空串；托盘菜单按其返回值实时显隐
+	Width       uint          // 初始宽度
+	Height      uint          // 初始高度
+	Debug       bool          // 是否启用开发者工具
+	Theme       string        // 界面主题: auto(跟随系统)/dark/light
+	OnStopQueue func()        // 托盘菜单“急停所有任务”回调
+	OnExit      func()        // 托盘菜单“彻底退出”回调
 }
 
 // App 桌面宿主实例
@@ -141,7 +141,12 @@ func (a *App) showContextMenu() {
 	titlePtr, _ := windows.UTF16PtrFromString("🖥️  打开主界面")
 	_, _, _ = procAppendMenuW.Call(hMenu, MF_STRING, ID_MENU_SHOW, uintptr(unsafe.Pointer(titlePtr)))
 
-	if a.cfg.LANURL != "" {
+	// 每次弹出菜单时实时解析局域网地址：运行时切换局域网开关即刻反映到入口显隐，不依赖启动时快照
+	lanURL := ""
+	if a.cfg.OnLANURL != nil {
+		lanURL = a.cfg.OnLANURL()
+	}
+	if lanURL != "" {
 		lanPtr, _ := windows.UTF16PtrFromString("🌐  复制局域网访问地址")
 		_, _, _ = procAppendMenuW.Call(hMenu, MF_STRING, ID_MENU_COPY_LAN, uintptr(unsafe.Pointer(lanPtr)))
 	}
@@ -168,9 +173,9 @@ func (a *App) showContextMenu() {
 	case ID_MENU_SHOW:
 		a.ShowAndRestore()
 	case ID_MENU_COPY_LAN:
-		if a.cfg.LANURL != "" {
-			_ = SetClipboardText(a.cfg.LANURL)
-			a.ShowBalloon("局域网地址已复制", a.cfg.LANURL+"\n可在手机或同局域网设备浏览器中打开。")
+		if lanURL != "" {
+			_ = SetClipboardText(lanURL)
+			a.ShowBalloon("局域网地址已复制", lanURL+"\n可在手机或同局域网设备浏览器中打开。")
 		}
 	case ID_MENU_STOP_ALL:
 		if a.cfg.OnStopQueue != nil {
