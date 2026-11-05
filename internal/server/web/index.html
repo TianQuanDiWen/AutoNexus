@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AutoNexus - 自动化任务批量调度</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <link rel="icon" type="image/svg+xml" href="/assets/app-icon.svg">
   <style>
     :root {
       --bg: #090d16;
@@ -290,7 +290,7 @@
 
   <header>
     <div class="brand">
-      <span class="logo">◈</span>
+      <img class="logo" src="/assets/app-icon.svg" width="26" height="26" alt="">
       <span>AutoNexus</span>
     </div>
     <div class="header-actions"><div class="ws-indicator" role="status">
@@ -302,7 +302,7 @@
   <main class="container">
     <section class="status-card" id="runControl" data-state="IDLE" aria-label="运行控制">
       <div class="status-summary"><span id="stateBadge" class="badge badge-IDLE">待命</span><span id="queueSummary">正在获取任务…</span></div>
-      <div class="status-body" id="runtimeDetails" hidden><span id="currentTaskName" title="当前任务"></span><span id="elapsedTime" title="运行耗时"></span><span id="progressText" title="队列位置"></span></div>
+      <div class="status-body" id="runtimeDetails" hidden><span id="currentTaskName" title="当前任务"></span><span id="elapsedTime" title="当前任务耗时"></span><span id="totalElapsedTime" title="本次启动总耗时"></span><span id="progressText" title="队列位置"></span></div>
       <div id="cooldownBox" class="state-detail" style="display:none">冷却剩余 <strong id="cooldownSec">0秒</strong></div>
       <div id="waitScheduleBox" class="state-detail" style="display:none">等待 <span id="waitTargetTime">04:00</span><strong id="waitScheduleSec"></strong><button class="btn btn-secondary btn-sm" onclick="skipWait()">跳过等待</button></div>
       <label class="force-option"><input type="checkbox" id="chkForceRun">包含今日已完成</label>
@@ -516,6 +516,9 @@
           切换预设可查看/编辑其子任务，保存时将指定该预设用于任务执行
         </div>
       </div>
+
+      <!-- 绑定预设失效警告（binding_stale，样式对齐设置页 #authWarnLine 的红字内联写法） -->
+      <div id="maaBindingWarn" style="display:none; margin:0 0 12px; color:#f87171; font-size:12.5px; line-height:1.6;"></div>
 
       <!-- 子任务项渲染列表 -->
       <div id="maaTaskListContainer" style="flex:1; max-height:460px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding-right:4px;">

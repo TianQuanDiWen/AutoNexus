@@ -13,25 +13,26 @@ import (
 
 // TaskConfig 自动化单项任务配置
 type TaskConfig struct {
-	ID                  string   `json:"id"`                           // 任务唯一标识符
-	Name                string   `json:"name"`                         // 任务友好名称
-	Enabled             bool     `json:"enabled"`                      // 是否参与队列轮转调度
-	Executable          string   `json:"executable"`                   // 执行程序路径 (如 madoaxvv-agent.exe)
-	Args                []string `json:"args"`                         // 启动命令行参数
-	WorkingDir          string   `json:"working_dir"`                  // 工作目录 (留空则使用可执行文件所在目录)
-	GameProcessNames    []string `json:"game_process_names"`           // 关联游戏进程名，用于任务结束后的残留清理
-	TimeoutSeconds      int      `json:"timeout_seconds"`              // 最大运行时长限制 (秒，0 为不限)
-	NoLogTimeoutSeconds int      `json:"no_log_timeout_seconds"`       // 静默无日志卡死检测阈值 (秒，0 为禁用)
-	CooldownSeconds     int      `json:"cooldown_seconds"`             // 任务结束后的冷却释放时间 (秒，默认 5~10s)
-	RefreshTime         string   `json:"refresh_time,omitempty"`       // 每日日常刷新时间 (如 "04:00"，留空不限制)
-	LastStartTime       string   `json:"last_start_time,omitempty"`    // 最近一次启动时间 (如 2006-01-02 15:04:05)
-	LastDuration        string   `json:"last_duration,omitempty"`      // 最近一次运行时长 (如 12s, 641ms)
-	LastSuccess         *bool    `json:"last_success,omitempty"`       // 最近一次运行是否成功 (true=成功, false=失败)
-	LastError           string   `json:"last_error,omitempty"`         // 若失败记录具体错误原因
-	IsCompletedToday    bool     `json:"is_completed_today,omitempty"` // 动态状态：在当前日常周期内是否已成功执行
-	IsMAA               bool     `json:"is_maa,omitempty"`             // 动态状态：是否检测到关联 MAA/MXU 自动化项目
-	MAAConfigID         string   `json:"maa_config_id,omitempty"`      // 用户选中的 MAA 执行配置预设 ID
-	MAAConfigName       string   `json:"maa_config_name,omitempty"`    // 用户选中的 MAA 执行配置预设名称
+	ID                  string            `json:"id"`                           // 任务唯一标识符
+	Name                string            `json:"name"`                         // 任务友好名称
+	Enabled             bool              `json:"enabled"`                      // 是否参与队列轮转调度
+	Executable          string            `json:"executable"`                   // 执行程序路径 (如 madoaxvv-agent.exe)
+	Args                []string          `json:"args"`                         // 启动命令行参数
+	WorkingDir          string            `json:"working_dir"`                  // 工作目录 (留空则使用可执行文件所在目录)
+	GameProcessNames    []string          `json:"game_process_names"`           // 关联游戏进程名，用于任务结束后的残留清理
+	TimeoutSeconds      int               `json:"timeout_seconds"`              // 最大运行时长限制 (秒，0 为不限)
+	NoLogTimeoutSeconds int               `json:"no_log_timeout_seconds"`       // 静默无日志卡死检测阈值 (秒，0 为禁用)
+	CooldownSeconds     int               `json:"cooldown_seconds"`             // 任务结束后的冷却释放时间 (秒，默认 5~10s)
+	RefreshTime         string            `json:"refresh_time,omitempty"`       // 每日日常刷新时间 (如 "04:00"，留空不限制)
+	LastStartTime       string            `json:"last_start_time,omitempty"`    // 最近一次启动时间 (如 2006-01-02 15:04:05)
+	LastDuration        string            `json:"last_duration,omitempty"`      // 最近一次运行时长 (如 12s, 641ms)
+	LastSuccess         *bool             `json:"last_success,omitempty"`       // 最近一次运行是否成功 (true=成功, false=失败)
+	LastError           string            `json:"last_error,omitempty"`         // 若失败记录具体错误原因
+	IsCompletedToday    bool              `json:"is_completed_today,omitempty"` // 动态状态：在当前日常周期内是否已成功执行
+	IsMAA               bool              `json:"is_maa,omitempty"`             // 动态状态：是否检测到关联 MAA/MXU 自动化项目
+	MAAConfigID         string            `json:"maa_config_id,omitempty"`      // 用户选中的 MAA 执行配置预设 ID
+	MAAConfigName       string            `json:"maa_config_name,omitempty"`    // 用户选中的 MAA 执行配置预设名称
+	MaaEntryAliases     map[string]string `json:"maa_entry_aliases,omitempty"`  // MXU 任务条目显示名映射 (entry_id -> 显示名)；只存 AutoNexus 自身配置，绝不写第三方文件
 }
 
 // Config 全局服务配置
@@ -128,6 +129,14 @@ func (m *Manager) Get() Config {
 	tasksCopy := make([]*TaskConfig, len(m.cfg.Tasks))
 	for i, t := range m.cfg.Tasks {
 		item := *t
+		// 映射为引用类型，显式深拷贝，避免调用方修改返回副本时波及 Manager 内部状态
+		if t.MaaEntryAliases != nil {
+			aliases := make(map[string]string, len(t.MaaEntryAliases))
+			for k, v := range t.MaaEntryAliases {
+				aliases[k] = v
+			}
+			item.MaaEntryAliases = aliases
+		}
 		tasksCopy[i] = &item
 	}
 
@@ -292,6 +301,10 @@ func (m *Manager) UpdateTask(task *TaskConfig) error {
 			if task.LastError == "" {
 				task.LastError = t.LastError
 			}
+			if task.MaaEntryAliases == nil {
+				// 与既有"新值零值回退旧值"模式一致：更新请求未携带别名映射时保留原有别名
+				task.MaaEntryAliases = t.MaaEntryAliases
+			}
 			effectiveWorkingDir := func(dir, executable string) string {
 				if dir == "" {
 					dir = filepath.Dir(executable)
@@ -315,6 +328,25 @@ func (m *Manager) UpdateTask(task *TaskConfig) error {
 		return fmt.Errorf("未找到任务 ID '%s'", task.ID)
 	}
 	return m.saveLocked()
+}
+
+// UpdateTaskMAABinding updates only the two saved MAA binding fields atomically.
+func (m *Manager) UpdateTaskMAABinding(taskID, configID, configName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, task := range m.cfg.Tasks {
+		if task.ID != taskID {
+			continue
+		}
+		oldID, oldName := task.MAAConfigID, task.MAAConfigName
+		task.MAAConfigID, task.MAAConfigName = configID, configName
+		if err := m.saveLocked(); err != nil {
+			task.MAAConfigID, task.MAAConfigName = oldID, oldName
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("未找到任务 ID '%s'", taskID)
 }
 
 // UpdateTaskRunStats 更新任务的最近启动时间、运行时长与执行结果并落盘持久化

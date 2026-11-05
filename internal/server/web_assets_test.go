@@ -14,6 +14,7 @@ func TestEmbeddedWorkspaceAssets(t *testing.T) {
 	}{
 		{"/assets/redesign.css", "text/css", ".workspace"},
 		{"/assets/workspace.js", "text/javascript", "function requestAPI"},
+		{"/assets/app-icon.svg", "image/svg+xml", "<svg"},
 	} {
 		t.Run(asset.path, func(t *testing.T) {
 			recorder := httptest.NewRecorder()

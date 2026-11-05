@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"autonexus/internal/config"
@@ -656,5 +657,443 @@ func TestServerMAAConfigAPI(t *testing.T) {
 	chkTask := cfgMgr.Get().Tasks[0]
 	if chkTask.MAAConfigID != "i1" || chkTask.MAAConfigName != "默认配置" {
 		t.Fatalf("Bug 3 regressed: MAA profile lost after editing task settings! ID=%s, Name=%s", chkTask.MAAConfigID, chkTask.MAAConfigName)
+	}
+}
+
+// setupMXUMockProject 构造带 MXU 项目的 mock 任务（多条目同名任务场景），返回临时项目目录
+func setupMXUMockProject(t *testing.T, srv *Server, cfgMgr *config.Manager, taskID string) string {
+	t.Helper()
+	tempDir := t.TempDir()
+
+	interfaceContent := `{
+  "interface_version": 2,
+  "name": "MockGame",
+  "task": [
+    {
+      "name": "制衣",
+      "label": "🧵 制衣",
+      "description": "可自行添加额外的制衣任务",
+      "default_check": true,
+      "option": ["ClothSlotOption"]
+    }
+  ],
+  "option": {
+    "ClothSlotOption": {"type":"select","cases":["Slot1","Slot2"],"default_case":"Slot1"}
+  }
+}`
+	_ = os.WriteFile(filepath.Join(tempDir, "interface.json"), []byte(interfaceContent), 0644)
+	_ = os.MkdirAll(filepath.Join(tempDir, "config"), 0755)
+	mxuContent := `{
+  "version": "1.0",
+  "instances": [
+    {
+      "id": "i1",
+      "name": "默认配置",
+      "tasks": [
+        { "id": "e1", "taskName": "制衣", "enabled": true, "expanded": true,
+          "enabledByController": { "MuMu模拟器": true },
+          "optionValues": { "ClothSlotOption": { "type": "select", "caseName": "Slot2" } } }
+      ]
+    }
+  ],
+  "lastActiveInstanceId": "i1"
+}`
+	_ = os.WriteFile(filepath.Join(tempDir, "config", "mxu-MockGame.json"), []byte(mxuContent), 0644)
+
+	task := &config.TaskConfig{
+		ID:         taskID,
+		Name:       "Mock MAA 任务",
+		Executable: filepath.Join(tempDir, "MockGame.exe"),
+		WorkingDir: tempDir,
+		Enabled:    true,
+	}
+	if err := cfgMgr.AddTask(task); err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+	return tempDir
+}
+
+// TestServerTaskMAABindingStaleField 检查配置接口返回绑定漂移状态及原始绑定值。
+func TestServerTaskMAABindingStaleField(t *testing.T) {
+	srv, cfgMgr, _ := setupTestServer(t)
+	setupMXUMockProject(t, srv, cfgMgr, "task_stale")
+
+	// 1. 绑定失效（ID 不在可用列表中）→ binding_stale=true，绑定值原样回显
+	task := cfgMgr.Get().Tasks[0]
+	task.MAAConfigID = "ghost_id"
+	task.MAAConfigName = "旧预设"
+	if err := cfgMgr.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	reqGet := httptest.NewRequest("GET", "/api/v1/tasks/task_stale/maa", nil)
+	recGet := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recGet, reqGet)
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d: %s", recGet.Code, recGet.Body.String())
+	}
+	var resp struct {
+		BindingStale   bool   `json:"binding_stale"`
+		BindingID      string `json:"binding_id"`
+		BindingName    string `json:"binding_name"`
+		ActiveConfigID string `json:"active_config_id"`
+		Profiles       []struct {
+			ID string `json:"id"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(recGet.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if !resp.BindingStale {
+		t.Fatalf("binding_stale should be true for drifted binding: %s", recGet.Body.String())
+	}
+	if resp.BindingID != "ghost_id" || resp.BindingName != "旧预设" {
+		t.Fatalf("binding_id/binding_name should echo stored values, got %q/%q", resp.BindingID, resp.BindingName)
+	}
+	if resp.ActiveConfigID != "i1" {
+		t.Fatalf("View fallback to active profile should be unchanged, got %s", resp.ActiveConfigID)
+	}
+	if len(resp.Profiles) != 1 || resp.Profiles[0].ID != "i1" {
+		t.Fatalf("Profiles mismatch: %+v", resp.Profiles)
+	}
+
+	// 2. 重新绑定到可用预设 → binding_stale=false
+	task.MAAConfigID = "i1"
+	task.MAAConfigName = "默认配置"
+	if err := cfgMgr.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	recGet2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recGet2, reqGet)
+	if err := json.Unmarshal(recGet2.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.BindingStale || resp.BindingID != "i1" || resp.BindingName != "默认配置" {
+		t.Fatalf("Fresh binding should not be stale, got %+v", resp)
+	}
+
+	// 3. 未绑定任务 → binding_stale=false 且 binding_id 为空（独立任务，避免 UpdateTask 零值回退重新绑定）
+	setupMXUMockProject(t, srv, cfgMgr, "task_fresh")
+	recGet3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recGet3, httptest.NewRequest("GET", "/api/v1/tasks/task_fresh/maa", nil))
+	if recGet3.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK for unbound task, got %d: %s", recGet3.Code, recGet3.Body.String())
+	}
+	if err := json.Unmarshal(recGet3.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.BindingStale || resp.BindingID != "" {
+		t.Fatalf("Unbound task should not be stale, got %+v", resp)
+	}
+}
+
+// TestServerDuplicateTaskMAAEntryAPI 复制 MXU 任务条目 API：紧随原条目插入深拷贝、新 id 格式一致
+func TestServerDuplicateTaskMAAEntryAPI(t *testing.T) {
+	srv, cfgMgr, _ := setupTestServer(t)
+	setupMXUMockProject(t, srv, cfgMgr, "task_dup")
+	tempDir := cfgMgr.Get().Tasks[0].WorkingDir
+
+	// 1. 正常复制
+	body, _ := json.Marshal(map[string]string{"entry_id": "e1"})
+	req := httptest.NewRequest("POST", "/api/v1/tasks/task_dup/maa/task-entries/duplicate", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK on duplicate, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Message string `json:"message"`
+		EntryID string `json:"entry_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if resp.Message == "" || resp.EntryID == "" {
+		t.Fatalf("Expected message and entry_id in response, got %+v", resp)
+	}
+	newID := resp.EntryID
+	if len(newID) != 7 || newID == "e1" {
+		t.Fatalf("New entry id should be a fresh 7-char id, got %q", newID)
+	}
+	for _, ch := range newID {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+			t.Fatalf("New id should be lowercase alphanumeric, got %q", newID)
+		}
+	}
+
+	// 2. 磁盘文件：紧随原条目插入，字段深拷贝、id 重新生成
+	raw, err := os.ReadFile(filepath.Join(tempDir, "config", "mxu-MockGame.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root struct {
+		Instances []struct {
+			Tasks []map[string]any `json:"tasks"`
+		} `json:"instances"`
+	}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	tasks := root.Instances[0].Tasks
+	if len(tasks) != 2 || tasks[0]["id"] != "e1" || tasks[1]["id"] != newID {
+		t.Fatalf("Copy should be inserted right after original, got %+v", tasks)
+	}
+	copied := tasks[1]
+	if copied["taskName"] != "制衣" || copied["enabled"] != true || copied["expanded"] != true {
+		t.Fatalf("Copy should keep taskName/enabled/expanded, got %+v", copied)
+	}
+	if ctrl, ok := copied["enabledByController"].(map[string]any); !ok || ctrl["MuMu模拟器"] != true {
+		t.Fatalf("Copy should deep-keep enabledByController, got %+v", copied["enabledByController"])
+	}
+
+	// 3. GET 视图：同名任务渲染为两条独立条目
+	recGet := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recGet, httptest.NewRequest("GET", "/api/v1/tasks/task_dup/maa", nil))
+	var view struct {
+		Tasks []struct {
+			Name    string `json:"name"`
+			EntryID string `json:"entry_id"`
+		} `json:"tasks"`
+	}
+	_ = json.Unmarshal(recGet.Body.Bytes(), &view)
+	if len(view.Tasks) != 2 || view.Tasks[0].EntryID != "e1" || view.Tasks[1].EntryID != newID {
+		t.Fatalf("Both entries should render separately, got %+v", view.Tasks)
+	}
+
+	// 4. entry_id 不存在 → 404
+	badBody, _ := json.Marshal(map[string]string{"entry_id": "nope"})
+	recBad := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recBad, httptest.NewRequest("POST", "/api/v1/tasks/task_dup/maa/task-entries/duplicate", bytes.NewReader(badBody)))
+	if recBad.Code != http.StatusNotFound {
+		t.Fatalf("Expected 404 for unknown entry_id, got %d: %s", recBad.Code, recBad.Body.String())
+	}
+
+	// 5. 缺少 entry_id → 400
+	recEmpty := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recEmpty, httptest.NewRequest("POST", "/api/v1/tasks/task_dup/maa/task-entries/duplicate", bytes.NewReader([]byte(`{}`))))
+	if recEmpty.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for empty entry_id, got %d", recEmpty.Code)
+	}
+}
+
+// TestServerTaskMAAEntryAliasAPI 条目显示名别名：存 AutoNexus 自身 config.json，不写第三方文件
+func TestServerTaskMAAEntryAliasAPI(t *testing.T) {
+	srv, cfgMgr, _ := setupTestServer(t)
+	setupMXUMockProject(t, srv, cfgMgr, "task_alias")
+
+	// 1. 设置别名
+	body, _ := json.Marshal(map[string]string{"display_name": "制衣-上衣"})
+	req := httptest.NewRequest("PUT", "/api/v1/tasks/task_alias/maa/task-entries/e1/alias", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK on alias set, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Message     string `json:"message"`
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Message == "" || resp.DisplayName != "制衣-上衣" {
+		t.Fatalf("Unexpected alias response: %+v", resp)
+	}
+	if got := cfgMgr.Get().Tasks[0].MaaEntryAliases["e1"]; got != "制衣-上衣" {
+		t.Fatalf("Alias should be persisted in AutoNexus config, got %q", got)
+	}
+
+	// 2. GET 视图带出 display_name（key=entry_id）
+	recGet := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recGet, httptest.NewRequest("GET", "/api/v1/tasks/task_alias/maa", nil))
+	var view struct {
+		Tasks []struct {
+			EntryID     string `json:"entry_id"`
+			DisplayName string `json:"display_name"`
+		} `json:"tasks"`
+	}
+	_ = json.Unmarshal(recGet.Body.Bytes(), &view)
+	if len(view.Tasks) != 1 || view.Tasks[0].EntryID != "e1" || view.Tasks[0].DisplayName != "制衣-上衣" {
+		t.Fatalf("View should render display_name for aliased entry, got %+v", view.Tasks)
+	}
+
+	// 3. 不存在的条目 → 404，且别名不被误改
+	recBad := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recBad, httptest.NewRequest("PUT", "/api/v1/tasks/task_alias/maa/task-entries/ghost/alias", bytes.NewReader(body)))
+	if recBad.Code != http.StatusNotFound {
+		t.Fatalf("Expected 404 for unknown entry alias, got %d: %s", recBad.Code, recBad.Body.String())
+	}
+	if got := cfgMgr.Get().Tasks[0].MaaEntryAliases["ghost"]; got != "" {
+		t.Fatalf("Alias for unknown entry must not be saved, got %q", got)
+	}
+
+	// 4. 空串 = 删除别名
+	clearBody, _ := json.Marshal(map[string]string{"display_name": ""})
+	recClear := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recClear, httptest.NewRequest("PUT", "/api/v1/tasks/task_alias/maa/task-entries/e1/alias", bytes.NewReader(clearBody)))
+	if recClear.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK on alias clear, got %d: %s", recClear.Code, recClear.Body.String())
+	}
+	aliases := cfgMgr.Get().Tasks[0].MaaEntryAliases
+	if _, exists := aliases["e1"]; exists {
+		t.Fatalf("Empty display_name should delete the alias, got %+v", aliases)
+	}
+	recGet2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recGet2, httptest.NewRequest("GET", "/api/v1/tasks/task_alias/maa", nil))
+	// 用全新结构体解析：display_name 带 omitempty，缺失时不会覆盖旧结构体里残留的值
+	var viewAfter struct {
+		Tasks []struct {
+			EntryID     string `json:"entry_id"`
+			DisplayName string `json:"display_name"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(recGet2.Body.Bytes(), &viewAfter); err != nil {
+		t.Fatal(err)
+	}
+	if len(viewAfter.Tasks) != 1 || viewAfter.Tasks[0].DisplayName != "" {
+		t.Fatalf("display_name should disappear after alias clear, got %+v", viewAfter.Tasks)
+	}
+}
+
+// TestServerEntryOpsUseSelectedConfig 条目级操作必须作用于面板当前选中的预设（config_id 优先），避免"看 A 改 B"。
+func TestServerEntryOpsUseSelectedConfig(t *testing.T) {
+	srv, cfgMgr, _ := setupTestServer(t)
+	tempDir := t.TempDir()
+
+	interfaceContent := `{"interface_version":2,"name":"MockGame","task":[{"name":"制衣","label":"🧵 制衣","option":["ClothSlotOption"]}],"option":{"ClothSlotOption":{"type":"select","cases":["Slot1","Slot2"],"default_case":"Slot1"}}}`
+	_ = os.WriteFile(filepath.Join(tempDir, "interface.json"), []byte(interfaceContent), 0644)
+	_ = os.MkdirAll(filepath.Join(tempDir, "config"), 0755)
+	mxuContent := `{"version":"1.0","instances":[
+		{"id":"i1","name":"默认配置","tasks":[{"id":"e1","taskName":"制衣","enabled":true}]},
+		{"id":"i2","name":"自用","tasks":[{"id":"e2","taskName":"制衣","enabled":true}]}
+	],"lastActiveInstanceId":"i1"}`
+	_ = os.WriteFile(filepath.Join(tempDir, "config", "mxu-MockGame.json"), []byte(mxuContent), 0644)
+
+	task := &config.TaskConfig{
+		ID: "task_sel", Name: "双预设任务",
+		Executable: filepath.Join(tempDir, "MockGame.exe"), WorkingDir: tempDir,
+		MAAConfigID: "i1", MAAConfigName: "默认配置", Enabled: true,
+	}
+	if err := cfgMgr.AddTask(task); err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	readInst := func() map[string]int {
+		raw, err := os.ReadFile(filepath.Join(tempDir, "config", "mxu-MockGame.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var root struct {
+			Instances []struct {
+				ID    string           `json:"id"`
+				Tasks []map[string]any `json:"tasks"`
+			} `json:"instances"`
+		}
+		if err := json.Unmarshal(raw, &root); err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]int{}
+		for _, inst := range root.Instances {
+			out[inst.ID] = len(inst.Tasks)
+		}
+		return out
+	}
+
+	// 1. 面板切到 i2：复制必须发生在 i2（任务绑定仍是 i1）
+	body, _ := json.Marshal(map[string]string{"entry_id": "e2", "config_id": "i2"})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/api/v1/tasks/task_sel/maa/task-entries/duplicate", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	counts := readInst()
+	if counts["i1"] != 1 || counts["i2"] != 2 {
+		t.Fatalf("Expected i2 to gain a copy and i1 untouched, got %+v", counts)
+	}
+
+	// 2. config_id 指向不存在的预设 -> 400（不再误回退到任务绑定）
+	body2, _ := json.Marshal(map[string]string{"entry_id": "e1", "config_id": "missing"})
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, httptest.NewRequest("POST", "/api/v1/tasks/task_sel/maa/task-entries/duplicate", bytes.NewReader(body2)))
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for unknown config_id, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	// 3. 别名同样按 config_id 校验条目：i2 的条目带 config_id 时成功
+	body3, _ := json.Marshal(map[string]string{"display_name": "制衣-上衣", "config_id": "i2"})
+	rec3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec3, httptest.NewRequest("PUT", "/api/v1/tasks/task_sel/maa/task-entries/e2/alias", bytes.NewReader(body3)))
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("Expected 200 on alias with config_id, got %d: %s", rec3.Code, rec3.Body.String())
+	}
+
+	// 4. 不带 config_id 时条目按任务绑定实例（i1）校验：e2 只在 i2 -> 404
+	body4, _ := json.Marshal(map[string]string{"display_name": "x"})
+	rec4 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec4, httptest.NewRequest("PUT", "/api/v1/tasks/task_sel/maa/task-entries/e2/alias", bytes.NewReader(body4)))
+	if rec4.Code != http.StatusNotFound {
+		t.Fatalf("Expected 404 when entry not in bound instance, got %d: %s", rec4.Code, rec4.Body.String())
+	}
+
+	// 5. 别名写入了 AutoNexus 自身配置且带 config_id 的保存可重读
+	if got := cfgMgr.Get().Tasks[0].MaaEntryAliases["e2"]; got != "制衣-上衣" {
+		t.Fatalf("Expected alias persisted for e2, got %q", got)
+	}
+}
+
+// TestServerDuplicateTaskMAAEntryConcurrent 并发复制共享同一配置文件必须串行：4 个并发请求各产出一条新条目
+func TestServerDuplicateTaskMAAEntryConcurrent(t *testing.T) {
+	srv, cfgMgr, _ := setupTestServer(t)
+	setupMXUMockProject(t, srv, cfgMgr, "task_race")
+
+	const n = 4
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body, _ := json.Marshal(map[string]string{"entry_id": "e1"})
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/api/v1/tasks/task_race/maa/task-entries/duplicate", bytes.NewReader(body)))
+			codes[i] = rec.Code
+			var resp struct {
+				EntryID string `json:"entry_id"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+			ids[i] = resp.EntryID
+		}(i)
+	}
+	wg.Wait()
+
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("Concurrent duplicate %d: expected 200, got %d", i, code)
+		}
+	}
+	unique := map[string]bool{}
+	for _, id := range ids {
+		if id == "" || unique[id] {
+			t.Fatalf("Expected %d distinct new entry ids, got %v", n, ids)
+		}
+		unique[id] = true
+	}
+
+	tempDir := cfgMgr.Get().Tasks[0].WorkingDir
+	raw, err := os.ReadFile(filepath.Join(tempDir, "config", "mxu-MockGame.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root struct {
+		Instances []struct {
+			Tasks []map[string]any `json:"tasks"`
+		} `json:"instances"`
+	}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	if len(root.Instances[0].Tasks) != 1+n {
+		t.Fatalf("Expected %d entries after concurrent duplicates, got %d", 1+n, len(root.Instances[0].Tasks))
 	}
 }

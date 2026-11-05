@@ -89,6 +89,13 @@ func TestEngineQueueFlow(t *testing.T) {
 	if !status.LastResults[0].Success || !status.LastResults[1].Success {
 		t.Fatalf("Expected all tasks to succeed, got results: %+v", status.LastResults)
 	}
+	eng.mu.RLock()
+	finishedTotal := eng.totalElapsedSeconds
+	startCleared := eng.totalStartTime.IsZero()
+	eng.mu.RUnlock()
+	if !startCleared || status.TotalElapsedSeconds != finishedTotal {
+		t.Fatalf("Expected queue total duration to be frozen after completion: status=%d stored=%d startCleared=%v", status.TotalElapsedSeconds, finishedTotal, startCleared)
+	}
 	t.Logf("Engine queue finished successfully with 2 tasks")
 
 	// 再次启动队列 (非强制模式)，此时所有任务今日已完成，应立即跳过全部任务直接返回 IDLE
@@ -103,9 +110,39 @@ func TestEngineQueueFlow(t *testing.T) {
 	if len(status.LastResults) != 0 {
 		t.Fatalf("Expected 0 executed task results on skipped run, got %d", len(status.LastResults))
 	}
+	eng.mu.RLock()
+	startCleared = eng.totalStartTime.IsZero()
+	eng.mu.RUnlock()
+	if !startCleared {
+		t.Fatal("Expected second queue run total timer to be cleared on completion")
+	}
 	t.Logf("Engine successfully skipped all completed tasks in routine mode")
 
 	_ = os.Remove(cfgPath)
+}
+
+func TestTotalElapsedIncludesCoolingAndFreezesAtEnd(t *testing.T) {
+	cfgMgr, err := config.NewManager(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := &Engine{state: StateCooling, configMgr: cfgMgr, totalStartTime: time.Now().Add(-65 * time.Second), taskStartTime: time.Now().Add(-10 * time.Second)}
+	status := eng.GetStatus()
+	if status.TotalElapsedSeconds < 65 {
+		t.Fatalf("total elapsed should include queue time and cooling, got %d", status.TotalElapsedSeconds)
+	}
+	if status.ElapsedSeconds < 10 {
+		t.Fatalf("single-task elapsed should remain available, got %d", status.ElapsedSeconds)
+	}
+	eng.mu.Lock()
+	eng.totalElapsedSeconds = int64(time.Since(eng.totalStartTime).Seconds())
+	eng.totalStartTime = time.Time{}
+	eng.state = StateIdle
+	eng.mu.Unlock()
+	status = eng.GetStatus()
+	if status.TotalElapsedSeconds < 65 {
+		t.Fatalf("completed total elapsed should remain frozen, got %d", status.TotalElapsedSeconds)
+	}
 }
 
 func TestEngineMAAProfileActivationFailureAbortsTask(t *testing.T) {

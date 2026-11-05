@@ -12,17 +12,23 @@ var (
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 	dwmapi   = windows.NewLazySystemDLL("dwmapi.dll")
 
-	procShowWindow          = user32.NewProc("ShowWindow")
-	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
-	procSetWindowLongPtrW   = user32.NewProc("SetWindowLongPtrW")
-	procCallWindowProcW     = user32.NewProc("CallWindowProcW")
-	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
-	procCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
-	procAppendMenuW         = user32.NewProc("AppendMenuW")
-	procDestroyMenu         = user32.NewProc("DestroyMenu")
-	procTrackPopupMenuEx    = user32.NewProc("TrackPopupMenuEx")
-	procGetCursorPos        = user32.NewProc("GetCursorPos")
-	procLoadIconW           = user32.NewProc("LoadIconW")
+	procShowWindow                  = user32.NewProc("ShowWindow")
+	procSetForegroundWindow         = user32.NewProc("SetForegroundWindow")
+	procSetWindowLongPtrW           = user32.NewProc("SetWindowLongPtrW")
+	procCallWindowProcW             = user32.NewProc("CallWindowProcW")
+	procDefWindowProcW              = user32.NewProc("DefWindowProcW")
+	procCreatePopupMenu             = user32.NewProc("CreatePopupMenu")
+	procAppendMenuW                 = user32.NewProc("AppendMenuW")
+	procDestroyMenu                 = user32.NewProc("DestroyMenu")
+	procTrackPopupMenuEx            = user32.NewProc("TrackPopupMenuEx")
+	procGetCursorPos                = user32.NewProc("GetCursorPos")
+	procLoadIconW                   = user32.NewProc("LoadIconW")
+	procLoadImageW                  = user32.NewProc("LoadImageW")
+	procSendMessageW                = user32.NewProc("SendMessageW")
+	procDestroyIcon                 = user32.NewProc("DestroyIcon")
+	procGetModuleHandleW            = kernel32.NewProc("GetModuleHandleW")
+	procRegisterWindowMessageW      = user32.NewProc("RegisterWindowMessageW")
+	procChangeWindowMessageFilterEx = user32.NewProc("ChangeWindowMessageFilterEx")
 
 	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
 
@@ -68,6 +74,12 @@ const (
 	TPM_RIGHTBUTTON = 0x0002
 
 	IDI_APPLICATION = 32512
+	IMAGE_ICON      = 1
+	LR_DEFAULTSIZE  = 0x00000040
+	WM_SETICON      = 0x0080
+	MSGFLT_ALLOW    = 1
+	ICON_SMALL      = 0
+	ICON_BIG        = 1
 
 	DWMWA_USE_IMMERSIVE_DARK_MODE     = 20 // 深色标题栏 (Windows 10 20H1+)
 	DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19 // 深色标题栏 (Windows 10 早期版本属性号)

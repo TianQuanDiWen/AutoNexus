@@ -13,6 +13,9 @@ __debug_bin*
 # Local runtime configuration
 config.json
 
+# Local-only task notes and one-off requirements
+.agent/local/
+
 # Logs
 *.log
 

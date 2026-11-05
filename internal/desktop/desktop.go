@@ -4,6 +4,7 @@ package desktop
 
 import (
 	"errors"
+	"log"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -29,17 +30,26 @@ type Config struct {
 
 // App 桌面宿主实例
 type App struct {
-	cfg          Config
-	w            webview2.WebView
-	hwnd         uintptr
-	oldWndProc   uintptr
-	hIcon        uintptr
-	balloonShown bool
-	mu           sync.Mutex
-	isQuitting   bool
+	cfg               Config
+	w                 webview2.WebView
+	hwnd              uintptr
+	oldWndProc        uintptr
+	hIcon             uintptr
+	ownsIcon          bool
+	trayRegistered    bool
+	taskbarCreated    uint32
+	trayRecoveryReady bool
+	balloonShown      bool
+	mu                sync.Mutex
+	isQuitting        bool
 }
 
 var activeApp atomic.Pointer[App]
+
+var notifyTrayIcon = func(operation uint32, data *NOTIFYICONDATA) (bool, error) {
+	result, _, err := procShellNotifyIconW.Call(uintptr(operation), uintptr(unsafe.Pointer(data)))
+	return result != 0, err
+}
 
 func setWindowLongPtr(hwnd uintptr, nIndex int, newLong uintptr) (uintptr, error) {
 	if procSetWindowLongPtrW.Find() == nil {
@@ -66,6 +76,14 @@ func (a *App) handleWndProc(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
 		if a.isQuitting {
 			break
 		}
+		a.ensureTrayIcon()
+		if !shouldHideOnClose(a.trayRegistered, a.trayRecoveryReady, a.isQuitting) {
+			// A failed tray registration must neither strand the hidden window
+			// nor stop a running queue. Keep the existing window reachable.
+			log.Printf("AutoNexus cannot safely hide to the tray; keeping the window visible")
+			a.ShowAndRestore()
+			return 0
+		}
 		// 拦截点叉事件：隐藏窗口转入后台托盘
 		_, _, _ = procShowWindow.Call(hwnd, SW_HIDE)
 		if !a.balloonShown {
@@ -85,10 +103,22 @@ func (a *App) handleWndProc(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
 
 	case WM_DESTROY:
 		a.removeTrayIcon()
+	default:
+		if a.taskbarCreated != 0 && msg == a.taskbarCreated {
+			// Explorer recreates the notification area after a restart.
+			a.trayRegistered = false
+			if !a.addTrayIcon() {
+				a.ShowAndRestore()
+			}
+		}
 	}
 
 	r, _, _ := procCallWindowProcW.Call(a.oldWndProc, hwnd, uintptr(msg), wp, lp)
 	return r
+}
+
+func shouldHideOnClose(trayRegistered, trayRecoveryReady, isQuitting bool) bool {
+	return trayRegistered && trayRecoveryReady && !isQuitting
 }
 
 // ShowAndRestore 唤出并置顶主界面窗口
@@ -97,7 +127,14 @@ func (a *App) ShowAndRestore() {
 	_, _, _ = procSetForegroundWindow.Call(a.hwnd)
 }
 
-func (a *App) addTrayIcon() {
+func (a *App) addTrayIcon() bool {
+	if a.trayRegistered {
+		return true
+	}
+	if a.hIcon == 0 {
+		log.Printf("AutoNexus tray icon registration skipped: icon handle is zero")
+		return false
+	}
 	var nid NOTIFYICONDATA
 	nid.CbSize = uint32(unsafe.Sizeof(nid))
 	nid.HWnd = a.hwnd
@@ -107,11 +144,55 @@ func (a *App) addTrayIcon() {
 	nid.HIcon = a.hIcon
 	tip, _ := windows.UTF16FromString(a.cfg.Title)
 	copy(nid.SzTip[:], tip)
-	_, _, _ = procShellNotifyIconW.Call(NIM_ADD, uintptr(unsafe.Pointer(&nid)))
+	result, callErr := notifyTrayIcon(NIM_ADD, &nid)
+	if !result {
+		if a.ownsIcon {
+			log.Printf("AutoNexus tray icon registration failed with embedded icon; retrying with the Windows system icon: %v", callErr)
+			fallback, _, _ := procLoadIconW.Call(0, uintptr(IDI_APPLICATION))
+			if fallback != 0 {
+				oldIcon := a.hIcon
+				a.hIcon = fallback
+				a.ownsIcon = false
+				nid.HIcon = fallback
+				procSendMessageW.Call(a.hwnd, WM_SETICON, ICON_BIG, fallback)
+				procSendMessageW.Call(a.hwnd, WM_SETICON, ICON_SMALL, fallback)
+				procDestroyIcon.Call(oldIcon)
+				result, callErr = notifyTrayIcon(NIM_ADD, &nid)
+			}
+		}
+		if !result {
+			log.Printf("AutoNexus tray icon registration failed (Shell_NotifyIconW NIM_ADD): %v", callErr)
+			return false
+		}
+	}
+	a.trayRegistered = true
+	return true
+}
+
+// ensureTrayIcon checks that Explorer still owns the icon, then re-adds it if needed.
+func (a *App) ensureTrayIcon() bool {
+	if a.trayRegistered {
+		var nid NOTIFYICONDATA
+		nid.CbSize = uint32(unsafe.Sizeof(nid))
+		nid.HWnd = a.hwnd
+		nid.UID = 1
+		nid.UFlags = NIF_ICON | NIF_TIP
+		nid.HIcon = a.hIcon
+		tip, _ := windows.UTF16FromString(a.cfg.Title)
+		copy(nid.SzTip[:], tip)
+		if result, _ := notifyTrayIcon(NIM_MODIFY, &nid); result {
+			return true
+		}
+		a.trayRegistered = false
+	}
+	return a.addTrayIcon()
 }
 
 // ShowBalloon 在任务栏托盘弹出 Windows 系统提示气泡
 func (a *App) ShowBalloon(title, info string) {
+	if !a.trayRegistered {
+		return
+	}
 	var nid NOTIFYICONDATA
 	nid.CbSize = uint32(unsafe.Sizeof(nid))
 	nid.HWnd = a.hwnd
@@ -120,15 +201,19 @@ func (a *App) ShowBalloon(title, info string) {
 	nid.DwInfoFlags = NIIF_INFO
 	copy(nid.SzInfoTitle[:], windows.StringToUTF16(title))
 	copy(nid.SzInfo[:], windows.StringToUTF16(info))
-	_, _, _ = procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&nid)))
+	_, _ = notifyTrayIcon(NIM_MODIFY, &nid)
 }
 
 func (a *App) removeTrayIcon() {
+	if !a.trayRegistered {
+		return
+	}
 	var nid NOTIFYICONDATA
 	nid.CbSize = uint32(unsafe.Sizeof(nid))
 	nid.HWnd = a.hwnd
 	nid.UID = 1
-	_, _, _ = procShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&nid)))
+	_, _ = notifyTrayIcon(NIM_DELETE, &nid)
+	a.trayRegistered = false
 }
 
 func (a *App) showContextMenu() {
@@ -281,13 +366,42 @@ func Run(cfg Config) error {
 	hwnd := uintptr(w.Window())
 	dark := cfg.Theme == "dark" || (cfg.Theme != "light" && systemPrefersDark())
 	applyChrome(hwnd, dark)
-	hIcon, _, _ := procLoadIconW.Call(0, uintptr(IDI_APPLICATION))
+	// Icon resource 1 is embedded in the executable by the generated Windows .syso file.
+	// Load it once and share the same handle between the window and notification area.
+	hInstance, _, _ := procGetModuleHandleW.Call(0)
+	hIcon, _, _ := procLoadImageW.Call(hInstance, 1, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE)
+	ownsIcon := hIcon != 0
+	if hIcon == 0 {
+		hIcon, _, _ = procLoadIconW.Call(0, uintptr(IDI_APPLICATION))
+	}
+	procSendMessageW.Call(hwnd, WM_SETICON, ICON_BIG, hIcon)
+	procSendMessageW.Call(hwnd, WM_SETICON, ICON_SMALL, hIcon)
 
 	app := &App{
-		cfg:   cfg,
-		w:     w,
-		hwnd:  hwnd,
-		hIcon: hIcon,
+		cfg:      cfg,
+		w:        w,
+		hwnd:     hwnd,
+		hIcon:    hIcon,
+		ownsIcon: ownsIcon,
+	}
+	if taskbarMsg, err := windows.UTF16PtrFromString("TaskbarCreated"); err == nil {
+		msg, _, callErr := procRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(taskbarMsg)))
+		app.taskbarCreated = uint32(msg)
+		if msg == 0 {
+			log.Printf("AutoNexus could not register TaskbarCreated notification: %v", callErr)
+		} else if procChangeWindowMessageFilterEx.Find() == nil {
+			// The application may be elevated while Explorer is not; allow only
+			// this payload-free broadcast so Explorer restart recovery reaches us.
+			if result, _, filterErr := procChangeWindowMessageFilterEx.Call(hwnd, msg, MSGFLT_ALLOW, 0); result == 0 {
+				log.Printf("AutoNexus could not allow TaskbarCreated notification through UIPI: %v", filterErr)
+			} else {
+				app.trayRecoveryReady = true
+			}
+		} else {
+			log.Printf("AutoNexus TaskbarCreated notification cannot be allowed through UIPI on this Windows version")
+		}
+	} else {
+		log.Printf("AutoNexus could not encode TaskbarCreated notification name: %v", err)
 	}
 
 	activeApp.Store(app)
@@ -315,15 +429,20 @@ func Run(cfg Config) error {
 
 	// 退出后清理
 	app.removeTrayIcon()
+	if app.ownsIcon && app.hIcon != 0 {
+		procDestroyIcon.Call(app.hIcon)
+	}
 	activeApp.Store(nil)
 
 	return nil
 }
 
 // TerminateActiveApp 如果当前桌面窗口正在运行，外部请求终止
-func TerminateActiveApp() {
+func TerminateActiveApp() bool {
 	app := activeApp.Load()
 	if app != nil {
 		app.Exit()
+		return true
 	}
+	return false
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -28,6 +29,9 @@ var redesignCSS []byte
 
 //go:embed web/workspace.js
 var workspaceJS []byte
+
+//go:embed web/app-icon.svg
+var appIconSVG []byte
 
 // Server HTTP 与 WebSocket Web 服务
 type Server struct {
@@ -179,6 +183,8 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("GET /api/v1/tasks/{id}/logs", s.handleGetTaskLogs)
 	s.mux.HandleFunc("GET /api/v1/tasks/{id}/maa", s.handleGetTaskMAAConfig)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/maa", s.handleUpdateTaskMAAConfig)
+	s.mux.HandleFunc("POST /api/v1/tasks/{id}/maa/task-entries/duplicate", s.handleDuplicateTaskMAAEntry)
+	s.mux.HandleFunc("PUT /api/v1/tasks/{id}/maa/task-entries/{entry_id}/alias", s.handleUpdateTaskMAAEntryAlias)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/run", s.handleRunTask)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/toggle", s.handleToggleTask)
 	s.mux.HandleFunc("POST /api/v1/tasks/reorder", s.handleReorderTasks)
@@ -190,6 +196,11 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("GET /ws/logs", s.handleWSLogs)
 
 	// 嵌入式 Web 控制台
+	s.mux.HandleFunc("GET /assets/app-icon.svg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(appIconSVG)
+	})
 	s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(indexHTML)
@@ -515,6 +526,10 @@ func (s *Server) handleGetTaskMAAConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// 保留任务当前存储的原始绑定值，供控制台诊断绑定漂移。
+	bindingID := targetTask.MAAConfigID
+	bindingName := targetTask.MAAConfigName
+
 	proj, err := maa.DetectProject(targetTask.WorkingDir, targetTask.Executable)
 	if err != nil {
 		s.writeJSON(w, http.StatusOK, map[string]any{
@@ -529,13 +544,13 @@ func (s *Server) handleGetTaskMAAConfig(w http.ResponseWriter, r *http.Request) 
 		selectedConfigID = targetTask.MAAConfigID
 	}
 
-	view, err := maa.GetConfigView(proj, selectedConfigID)
+	view, err := maa.GetConfigViewWithAliases(proj, selectedConfigID, targetTask.MaaEntryAliases)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "解析 MAA 配置失败: "+err.Error())
 		return
 	}
 
-	// 若任务当前未绑定 MAAConfigName 或已漂移，自动补齐
+	// 任务尚未保存预设名称时，补齐绑定的显示信息。
 	if view.ActiveConfigID != "" && targetTask.MAAConfigName == "" {
 		for _, p := range view.Profiles {
 			if p.ID == view.ActiveConfigID {
@@ -547,7 +562,32 @@ func (s *Server) handleGetTaskMAAConfig(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	s.writeJSON(w, http.StatusOK, view)
+	// 绑定漂移诊断：任务绑定的预设 ID 已不在当前可用列表中（MXU 重建后实例 ID 换代）
+	bindingStale := false
+	if bindingID != "" {
+		bindingStale = true
+		for _, p := range view.Profiles {
+			if p.ID == bindingID {
+				bindingStale = false
+				break
+			}
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, taskMAAConfigResponse{
+		ConfigView:   view,
+		BindingStale: bindingStale,
+		BindingID:    bindingID,
+		BindingName:  bindingName,
+	})
+}
+
+// taskMAAConfigResponse 包含 MAA 配置视图与绑定漂移诊断字段。
+type taskMAAConfigResponse struct {
+	*maa.ConfigView
+	BindingStale bool   `json:"binding_stale"` // 任务绑定的 maa_config_id 不在当前可用预设列表中
+	BindingID    string `json:"binding_id"`    // 任务当前存储的绑定预设 ID（原样回显）
+	BindingName  string `json:"binding_name"`  // 任务当前存储的绑定预设名称（原样回显）
 }
 
 func (s *Server) handleUpdateTaskMAAConfig(w http.ResponseWriter, r *http.Request) {
@@ -605,6 +645,162 @@ func (s *Server) handleUpdateTaskMAAConfig(w http.ResponseWriter, r *http.Reques
 		"message":            "MAA 自动化配置已成功保存并在执行时生效",
 		"active_config_id":   targetTask.MAAConfigID,
 		"active_config_name": targetTask.MAAConfigName,
+	})
+}
+
+// handleDuplicateTaskMAAEntry 复制 MXU 实例内的一条任务条目（紧随原条目插入深拷贝，新条目重新生成随机 id）。
+// 官方设计允许同名任务多条目（如制衣任务可自行添加额外的制衣任务）；这是唯一允许写入第三方 MXU 文件的条目级操作。
+func (s *Server) handleDuplicateTaskMAAEntry(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("id")
+	if taskID == "" {
+		s.writeError(w, http.StatusBadRequest, "缺少 task id")
+		return
+	}
+	var req struct {
+		EntryID  string `json:"entry_id"`
+		ConfigID string `json:"config_id"` // 前端面板当前选中的预设；空则回退任务绑定的预设
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "解析请求 JSON 失败: "+err.Error())
+		return
+	}
+	req.EntryID = strings.TrimSpace(req.EntryID)
+	if req.EntryID == "" {
+		s.writeError(w, http.StatusBadRequest, "缺少 entry_id")
+		return
+	}
+	req.ConfigID = strings.TrimSpace(req.ConfigID)
+
+	cfg := s.configMgr.Get()
+	var targetTask *config.TaskConfig
+	for _, t := range cfg.Tasks {
+		if t.ID == taskID {
+			targetTask = t
+			break
+		}
+	}
+	if targetTask == nil {
+		s.writeError(w, http.StatusNotFound, "未找到任务")
+		return
+	}
+
+	proj, err := maa.DetectProject(targetTask.WorkingDir, targetTask.Executable)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "该任务未检测到有效的 MAA 项目: "+err.Error())
+		return
+	}
+	if proj.ConfigType != "mxu" {
+		s.writeError(w, http.StatusBadRequest, "任务条目操作仅支持 MXU 类型项目")
+		return
+	}
+
+	// 条目操作必须作用于面板当前可见的预设，避免"看 A 改 B"：显式传参优先，缺省回退任务绑定
+	instanceID := req.ConfigID
+	if instanceID == "" {
+		instanceID = targetTask.MAAConfigID
+	}
+	newID, err := maa.DuplicateTaskEntry(proj, instanceID, req.EntryID)
+	if err != nil {
+		if errors.Is(err, maa.ErrEntryNotFound) {
+			s.writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, maa.ErrMXUInstanceNotFound) {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, "复制任务条目失败: "+err.Error())
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"message":  "任务条目已复制",
+		"entry_id": newID,
+	})
+}
+
+// handleUpdateTaskMAAEntryAlias 设置/清除 MXU 任务条目的显示名别名。
+// display_name 传空串表示删除该别名；别名数据只存 AutoNexus 自身的 config.json，绝不写第三方文件。
+func (s *Server) handleUpdateTaskMAAEntryAlias(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("id")
+	entryID := r.PathValue("entry_id")
+	if taskID == "" || entryID == "" {
+		s.writeError(w, http.StatusBadRequest, "缺少 task id 或 entry_id")
+		return
+	}
+	var req struct {
+		DisplayName string `json:"display_name"`
+		ConfigID    string `json:"config_id"` // 前端面板当前选中的预设；空则回退任务绑定的预设
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "解析请求 JSON 失败: "+err.Error())
+		return
+	}
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.ConfigID = strings.TrimSpace(req.ConfigID)
+
+	cfg := s.configMgr.Get()
+	var targetTask *config.TaskConfig
+	for _, t := range cfg.Tasks {
+		if t.ID == taskID {
+			targetTask = t
+			break
+		}
+	}
+	if targetTask == nil {
+		s.writeError(w, http.StatusNotFound, "未找到任务")
+		return
+	}
+
+	proj, err := maa.DetectProject(targetTask.WorkingDir, targetTask.Executable)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "该任务未检测到有效的 MAA 项目: "+err.Error())
+		return
+	}
+	if proj.ConfigType != "mxu" {
+		s.writeError(w, http.StatusBadRequest, "任务条目别名仅支持 MXU 类型项目")
+		return
+	}
+
+	// 条目存在性校验必须作用于面板当前可见的预设，避免"看 A 改 B"：显式传参优先，缺省回退任务绑定
+	instanceID := req.ConfigID
+	if instanceID == "" {
+		instanceID = targetTask.MAAConfigID
+	}
+	// 仅对实时读 MXU 文件确认存在的条目生效
+	exists, err := maa.TaskEntryExists(proj, instanceID, entryID)
+	if err != nil {
+		if errors.Is(err, maa.ErrMXUInstanceNotFound) {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.writeError(w, http.StatusInternalServerError, "校验任务条目失败: "+err.Error())
+		return
+	}
+	if !exists {
+		s.writeError(w, http.StatusNotFound, "未找到指定的任务条目: "+entryID)
+		return
+	}
+
+	// 重建映射而非原地修改，避免波及 Manager 内部共享的 map
+	newAliases := make(map[string]string, len(targetTask.MaaEntryAliases)+1)
+	for k, v := range targetTask.MaaEntryAliases {
+		newAliases[k] = v
+	}
+	if req.DisplayName == "" {
+		delete(newAliases, entryID)
+	} else {
+		newAliases[entryID] = req.DisplayName
+	}
+	targetTask.MaaEntryAliases = newAliases
+	if err := s.configMgr.UpdateTask(targetTask); err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"message":      "任务条目显示名已更新",
+		"display_name": req.DisplayName,
 	})
 }
 

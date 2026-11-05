@@ -2,7 +2,10 @@
 
 package desktop
 
-import "errors"
+import (
+	"errors"
+	"log"
+)
 
 // Config 桌面窗口初始化配置 (非 Windows 平台桩定义)
 type Config struct {
@@ -23,4 +26,14 @@ func Run(cfg Config) error {
 }
 
 // TerminateActiveApp 非 Windows 平台空实现
-func TerminateActiveApp() {}
+func TerminateActiveApp() bool { return false }
+
+// RestoreExistingWindow is unsupported on non-Windows platforms.
+func RestoreExistingWindow(title string) (ExistingWindowResult, error) {
+	return ExistingWindowNotFound, nil
+}
+
+// ShowStartupError writes startup failures to stderr on non-Windows platforms.
+func ShowStartupError(title, message string) {
+	log.Printf("%s: %s", title, message)
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -21,6 +22,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Print(err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfgPath := flag.String("config", "config.json", "配置文件存储路径")
 	portFlag := flag.Int("port", 0, "自定义服务端口 (默认使用配置文件设置)")
 	noElevate := flag.Bool("no-elevate", false, "禁止自动尝试请求 Windows 管理员特权")
@@ -34,14 +42,18 @@ func main() {
 		if err := RerunAsAdmin(); err != nil {
 			fmt.Printf("自动提权启动失败，降级以当前权限继续运行: %v\n", err)
 		} else {
-			return
+			return nil
 		}
 	}
 
 	// 1. 初始化配置
 	cfgMgr, err := config.NewManager(*cfgPath)
 	if err != nil {
-		log.Fatalf("加载配置文件失败: %v", err)
+		message := fmt.Sprintf("加载配置文件失败: %v", err)
+		if noticeErr := startupNotice(message, *noUI); noticeErr != nil {
+			return noticeErr
+		}
+		return nil
 	}
 
 	cfg := cfgMgr.Get()
@@ -50,14 +62,48 @@ func main() {
 		port = *portFlag
 	}
 
-	// 2. 初始化核心组件
-	broadcaster := executor.NewBroadcaster(1000)
-	runner := executor.NewRunner(broadcaster)
-	eng := engine.NewEngine(cfgMgr, runner, broadcaster)
-	srv := server.NewServer(cfgMgr, eng, broadcaster)
-
-	// 3. 构建 HTTP 监听
+	// 2. Bind synchronously before constructing the engine/runner. A second
+	// launch must not create scheduler state when this address is already owned.
 	listenAddr := fmt.Sprintf("%s:%d", cfg.Host, port)
+	var broadcaster *executor.Broadcaster
+	var eng *engine.Engine
+	var srv *server.Server
+	listener, err := bindBeforeRuntime(listenAddr, func(net.Listener) error {
+		broadcaster = executor.NewBroadcaster(1000)
+		runner := executor.NewRunner(broadcaster)
+		eng = engine.NewEngine(cfgMgr, runner, broadcaster)
+		srv = server.NewServer(cfgMgr, eng, broadcaster)
+		return nil
+	})
+	if err != nil {
+		localURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+		if isAutoNexusService(&http.Client{Timeout: 800 * time.Millisecond}, localURL) {
+			result := desktop.ExistingWindowNotFound
+			var restoreErr error
+			if !*noUI {
+				result, restoreErr = desktop.RestoreExistingWindow(desktopWindowTitle)
+				if restoreErr == nil && result == desktop.ExistingWindowRestored {
+					return nil
+				}
+			}
+			message := fmt.Sprintf("AutoNexus 已在运行，地址：%s。", localURL)
+			switch {
+			case *noUI:
+				message += "当前为无界面模式，未尝试操作现有窗口。"
+			case restoreErr != nil:
+				message += "唤起现有窗口时出错；请在浏览器中打开该地址。"
+			case result == desktop.ExistingWindowAmbiguous:
+				message += "检测到多个同名窗口，为避免选错窗口，请在浏览器中打开该地址。"
+			default:
+				message += "没有找到唯一匹配的桌面窗口，请在浏览器中打开该地址。"
+			}
+			return startupNotice(message, *noUI)
+		}
+		message := fmt.Sprintf("AutoNexus 无法监听 %s。请检查端口是否被占用，以及主机地址是否有效。\n\n详细信息：%v", listenAddr, err)
+		return startupNotice(message, *noUI)
+	}
+
+	// 3. Build the HTTP server around the already-bound socket.
 	httpServer := &http.Server{
 		Addr:              listenAddr,
 		Handler:           srv.Handler(),
@@ -68,25 +114,54 @@ func main() {
 	// 4. 打印欢迎面板与局域网 IP 提示
 	printBanner(port, &cfg)
 
-	// 5. 启动 HTTP 服务
-	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP 服务异常退出: %v", err)
-		}
-	}()
-
-	// 6. 优雅停机信号监听
+	// 5. Start HTTP serving. Errors are delivered to the main flow rather than
+	// calling log.Fatalf from a goroutine (which would silently os.Exit in GUI mode).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	serveErrors := make(chan error, 1)
+	go func() {
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErrors <- err
+		}
+		close(serveErrors)
+	}()
 
+	var runErr error
 	if *noUI {
 		// 纯后台模式：阻塞等待系统信号
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case err, ok := <-serveErrors:
+			if ok {
+				runErr = fmt.Errorf("HTTP 服务异常退出: %w", err)
+			}
+		}
 	} else {
 		// 桌面 UI 模式：由主线程承载 WebView2 窗口与托盘消息循环
 		go func() {
 			<-ctx.Done()
-			desktop.TerminateActiveApp()
+			deadline := time.NewTimer(5 * time.Second)
+			defer deadline.Stop()
+			ticker := time.NewTicker(50 * time.Millisecond)
+			defer ticker.Stop()
+			for !desktop.TerminateActiveApp() {
+				select {
+				case <-deadline.C:
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+		serverFailure := make(chan error, 1)
+		go func() {
+			err, ok := <-serveErrors
+			if !ok {
+				return
+			}
+			log.Printf("HTTP 服务异常退出: %v", err)
+			serverFailure <- err
+			desktop.ShowStartupError("AutoNexus 服务错误", fmt.Sprintf("HTTP 服务异常退出：%v", err))
+			stop()
 		}()
 
 		dCfg := desktop.Config{
@@ -110,8 +185,15 @@ func main() {
 		}
 
 		if err := desktop.Run(dCfg); err != nil {
-			fmt.Printf("启动桌面原生窗口失败 (%v)，自动降级为无头后台服务...\n", err)
-			<-ctx.Done()
+			message := fmt.Sprintf("启动桌面原生窗口失败：%v", err)
+			desktop.ShowStartupError("AutoNexus 启动失败", message)
+			runErr = errors.New(message)
+		} else {
+			select {
+			case err := <-serverFailure:
+				runErr = fmt.Errorf("HTTP 服务异常退出: %w", err)
+			default:
+			}
 		}
 	}
 
@@ -124,6 +206,7 @@ func main() {
 		log.Printf("HTTP 服务停机超时: %v", err)
 	}
 	fmt.Println("AutoNexus 服务已安全退出。")
+	return runErr
 }
 
 func getPrimaryLANURL(port int) string {

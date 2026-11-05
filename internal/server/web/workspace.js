@@ -270,6 +270,36 @@ function updateConnectionIndicator() {
   if (refresh) refresh.hidden = !logScope && logConnected;
 }
 
+function formatElapsed(seconds) {
+  seconds = Math.max(0, Number(seconds) || 0);
+  const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
+  if (h) return `${h}小时${m}分${s}秒`;
+  if (m) return `${m}分${s}秒`;
+  return `${s}秒`;
+}
+
+function compactStartTime(value) {
+  if (!value) return '未运行';
+  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})$/);
+  return match ? `${match[2]}-${match[3]} ${match[4]}` : value;
+}
+
+function taskSummaryLine(task) {
+  const kind = task.is_maa ? `MAA · ${task.maa_config_name || '默认预设'}` : '外部程序';
+  return task.last_duration ? `${kind} · 上次耗时 ${task.last_duration}` : kind;
+}
+
+function taskStartLabel(value) {
+  return value ? `上次启动 ${compactStartTime(value)}` : '未运行';
+}
+
+function updateElapsedLabels(singleSeconds, totalSeconds) {
+  const elapsedEl = document.getElementById('elapsedTime');
+  if (elapsedEl) elapsedEl.textContent = `单项 ${formatElapsed(singleSeconds)}`;
+  const totalElapsedEl = document.getElementById('totalElapsedTime');
+  if (totalElapsedEl) totalElapsedEl.textContent = `总计 ${formatElapsed(totalSeconds)}`;
+}
+
 function renderStatus(data) {
   const previousStart = latestStatus.tasks?.find(task => task.id === logScope)?.last_start_time;
   latestStatus = data;
@@ -286,8 +316,7 @@ function renderStatus(data) {
   if (nameEl) nameEl.textContent = data.current_task_name || '无运行中任务';
 
   const seconds = data.elapsed_seconds || 0;
-  const elapsedEl = document.getElementById('elapsedTime');
-  if (elapsedEl) elapsedEl.textContent = seconds >= 60 ? `${Math.floor(seconds / 60)}分${seconds % 60}秒` : `${seconds}秒`;
+  updateElapsedLabels(seconds, data.total_elapsed_seconds);
 
   const progEl = document.getElementById('progressText');
   if (progEl) {
@@ -396,14 +425,14 @@ function renderTaskList(tasks) {
     card.dataset.taskId = t.id;
     card.innerHTML = `<div class="task-top">
       <span class="task-index" title="拖动调整队列顺序">${String(index + 1).padStart(2, '0')}</span>
-      <div class="task-info"><div class="task-name" title="${escapeHtml(t.name || t.id)}">${escapeHtml(t.name || t.id)}</div><div class="task-sub">${t.is_maa ? 'MAA · ' + escapeHtml(t.maa_config_name || '默认预设') : '外部程序'} · ${t.last_duration ? '上次耗时 ' + escapeHtml(t.last_duration) : '尚未运行'}</div></div>
+      <div class="task-info"><div class="task-name" title="${escapeHtml(t.name || t.id)}">${escapeHtml(t.name || t.id)}</div><div class="task-sub">${escapeHtml(taskSummaryLine(t))}</div><div class="task-start" title="${escapeHtml(t.last_start_time || '未运行')}">${escapeHtml(taskStartLabel(t.last_start_time))}</div></div>
       <span class="task-state ${active ? 'running' : failed ? 'error' : t.is_completed_today ? 'done' : ''}">${label}</span>
       <label class="switch"><input type="checkbox" aria-label="参与队列：${escapeHtml(t.name || t.id)}" ${t.enabled ? 'checked' : ''}><span class="slider"></span></label>
     </div>
     ${failed ? `<details class="task-error"><summary>${escapeHtml(t.last_error || '执行异常，请查看任务日志')}</summary><p>${escapeHtml(t.last_error || '执行异常，请查看任务日志')}</p></details>` : ''}
     <div class="task-footer">
       <div class="task-actions"><button class="btn btn-secondary btn-sm" data-action="run" data-idle-only>运行</button><button class="btn btn-secondary btn-sm" data-action="config">配置</button><button class="btn btn-secondary btn-sm" data-action="logs">日志</button>
-      <details class="task-more"><summary class="btn btn-secondary btn-sm" aria-label="更多任务操作">•••</summary><div class="more-menu"><div class="task-record">上次启动<br>${escapeHtml(t.last_start_time || '尚无记录')}</div><button data-action="edit">启动设置</button><button data-action="up" data-idle-only ${index === 0 ? 'disabled' : ''}>上移一位</button><button data-action="down" data-idle-only ${index === tasks.length - 1 ? 'disabled' : ''}>下移一位</button><button data-action="delete" style="color:var(--pill-err-text)">删除任务</button></div></details></div></div>`;
+      <details class="task-more"><summary class="btn btn-secondary btn-sm" aria-label="更多任务操作">•••</summary><div class="more-menu"><button data-action="edit">启动设置</button><button data-action="up" data-idle-only ${index === 0 ? 'disabled' : ''}>上移一位</button><button data-action="down" data-idle-only ${index === tasks.length - 1 ? 'disabled' : ''}>下移一位</button><button data-action="delete" style="color:var(--pill-err-text)">删除任务</button></div></details></div></div>`;
     card.querySelector('input').onchange = async event => {
       const checkbox = event.target;
       checkbox.disabled = true;
@@ -825,6 +854,7 @@ async function openMAAConfigModal(taskID, configID = '') {
   const modal = document.getElementById('maaConfigModal');
   const container = document.getElementById('maaTaskListContainer');
   container.innerHTML = '<div style="color:var(--text-muted); padding:30px; text-align:center;">正在检测并加载自动化配置...</div>';
+  updateMAABindingWarning(null);
   modal.style.display = 'flex';
   await loadMAAConfig(taskID, configID);
 }
@@ -862,6 +892,7 @@ async function loadMAAConfig(taskID, configID = '') {
 
     currentMAAData = data;
     currentSelectedProfileID = data.active_config_id || '';
+    updateMAABindingWarning(data);
 
     if (!data.is_maa) {
       container.innerHTML = '<div style="color:#f87171; padding:30px; text-align:center;">未检测到 MAA 框架 interface.json 声明文件</div>';
@@ -900,6 +931,7 @@ async function loadMAAConfig(taskID, configID = '') {
     }
   } catch (e) {
     if (version !== maaLoadVersion) return;
+    updateMAABindingWarning(null);
     container.innerHTML = `<div style="color:#f87171; padding:30px; text-align:center;">加载失败: ${escapeHtml(e.message || String(e))}</div>`;
     if (btnSave) {
       btnSave.disabled = true;
@@ -932,6 +964,8 @@ function renderMAATasks(tasks) {
 
   tasks.forEach((t, idx) => {
     const item = document.createElement('div');
+    item.id = `maa_task_item_${idx}`;
+    item.dataset.entryId = t.entry_id || '';
     item.style.background = '#0f172a';
     item.style.border = '1px solid #334155';
     item.style.borderRadius = '8px';
@@ -940,20 +974,26 @@ function renderMAATasks(tasks) {
     item.style.flexDirection = 'column';
     item.style.gap = '8px';
 
-    const safeLabel = escapeHtml(t.label || t.name);
+    const entryLabel = t.display_name || t.label || t.name;
+    const safeLabel = escapeHtml(entryLabel);
     const safeDesc = escapeHtml(t.description || '无任务说明');
     const safeName = escapeHtml(t.name);
+    // 仅 mxu 条目型任务（entry_id 非空）提供条目级操作；pi/mfaa 维持原样
+    const entryActions = t.entry_id ? `
+          <button type="button" class="btn btn-secondary btn-sm" data-entry-action="rename" data-entry-id="${escapeHtml(t.entry_id)}" style="padding:2px 8px; font-size:0.75rem; white-space:nowrap;">重命名</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-entry-action="duplicate" data-entry-id="${escapeHtml(t.entry_id)}" style="padding:2px 8px; font-size:0.75rem; white-space:nowrap;">复制此任务</button>` : '';
 
     let html = `
       <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
         <div style="flex:1;">
           <div style="display:flex; align-items:center; gap:8px;">
-            <span style="font-weight:700; color:#f1f5f9; font-size:0.95rem;">${safeLabel}</span>
+            <span style="font-weight:700; color:#f1f5f9; font-size:0.95rem;" title="${safeLabel}">${safeLabel}</span>
             <span style="font-size:0.75rem; color:#64748b; font-family:monospace;">(${safeName})</span>
           </div>
           <div style="font-size:0.8rem; color:#94a3b8; margin-top:4px; line-height:1.4;">${safeDesc}</div>
         </div>
-        <div>
+        <div style="display:flex; align-items:center; gap:6px;">
+          ${entryActions}
           <label class="switch">
             <input type="checkbox" id="chk_maa_task_${idx}" ${t.enabled ? 'checked' : ''}>
             <span class="slider"></span>
@@ -968,6 +1008,7 @@ function renderMAATasks(tasks) {
       t.sub_options.forEach((sub, sIdx) => {
         const subLabel = escapeHtml(sub.label || sub.name);
         const subDesc = escapeHtml(sub.description || '');
+        const visible = isSubOptionVisible(sub, t.sub_options);
         let controlHtml = '';
         if (sub.type === 'select') {
           const cases = sub.cases || [];
@@ -985,7 +1026,7 @@ function renderMAATasks(tasks) {
           `;
         }
         html += `
-          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:4px 0; border-bottom:${sIdx === t.sub_options.length - 1 ? 'none' : '1px solid rgba(255,255,255,0.04)'};">
+          <div id="maa_sub_row_${idx}_${sIdx}"${sub.depends_on ? ` data-depends-on="${escapeHtml(sub.depends_on)}"` : ''} style="display:${visible ? 'flex' : 'none'}; justify-content:space-between; align-items:center; gap:10px; padding:4px 0; border-bottom:${sIdx === t.sub_options.length - 1 ? 'none' : '1px solid rgba(255,255,255,0.04)'};">
             <div style="flex:1;">
               <span style="font-size:0.82rem; color:#e2e8f0; font-weight:600;">${subLabel}</span>
               ${subDesc ? `<div style="font-size:0.74rem; color:#64748b; margin-top:2px;">${subDesc}</div>` : ''}
@@ -1002,6 +1043,182 @@ function renderMAATasks(tasks) {
     item.innerHTML = html;
     container.appendChild(item);
   });
+
+  // 事件委托：子选项父值变化时实时刷新依赖选项显隐；条目按钮走条目级接口
+  container.onchange = event => {
+    const parts = maaControlIdParts(event && event.target ? event.target.id : '');
+    if (parts) refreshMAADependents(parts.taskIdx);
+  };
+  container.onclick = event => {
+    const target = event && event.target;
+    if (!target || typeof target.closest !== 'function') return;
+    const button = target.closest('[data-entry-action]');
+    if (!button || !button.dataset || !button.dataset.entryId) return;
+    if (button.dataset.entryAction === 'rename') renameMAAEntry(button.dataset.entryId);
+    else if (button.dataset.entryAction === 'duplicate') duplicateMAAEntry(button.dataset.entryId);
+  };
+}
+
+// ---- MAA 条目级与依赖选项辅助 ----
+
+// binding_stale=true 时在预设选择区域显示红字警告（内联样式对齐设置页 #authWarnLine 的写法）
+const MAA_BINDING_WARN_TEXT = '⚠ 绑定的预设已失效（MXU 配置可能被重建，ID 已变更），请重新选择并保存';
+function updateMAABindingWarning(data) {
+  const warn = document.getElementById('maaBindingWarn');
+  if (!warn) return;
+  const stale = !!(data && data.binding_stale);
+  warn.style.display = stale ? 'block' : 'none';
+  if (stale) warn.textContent = MAA_BINDING_WARN_TEXT;
+}
+
+// 依赖选项显隐判定（纯函数，便于单测）：
+// - 无 depends_on，或同一 TaskItem 内找不到父选项时兜底显示；
+// - switch 父选项：show_when 的 case 名按与后端 maa.isCaseTrue 一致的真假值规则解析，
+//   当前布尔值命中任一即显示（Yes/No、On/Off、开启/关闭等 case 名均可识别，未知名视为假）；
+// - select/input 父选项：当前 case 名（字符串）命中 show_when 任一项即显示；
+// - 多级依赖递归判定祖先链：任一祖先被隐藏，后代一并隐藏；ancestorChain 集合防循环引用。
+function isCaseNameTrue(name) {
+  const v = String(name == null ? '' : name).trim().toLowerCase();
+  return v === 'yes' || v === 'true' || v === 'on' || v === '开启' || v === '1';
+}
+
+function isSubOptionVisible(sub, subOptions, ancestorChain) {
+  if (!sub || !sub.depends_on) return true;
+  const options = Array.isArray(subOptions) ? subOptions : [];
+  const parent = options.find(o => o && o.name === sub.depends_on);
+  if (!parent) return true;
+  const chain = ancestorChain instanceof Set ? ancestorChain : new Set();
+  const parentName = String(sub.depends_on);
+  if (chain.has(parentName)) return true; // 循环引用：停止回溯，按直接条件判定
+  chain.add(parentName);
+  if (!isSubOptionVisible(parent, options, chain)) return false;
+  const when = (Array.isArray(sub.show_when) ? sub.show_when : []).map(v => String(v));
+  if (!when.length) return true;
+  if (parent.type === 'switch') {
+    return when.some(name => isCaseNameTrue(name) === !!parent.value);
+  }
+  return when.includes(String(parent.value == null ? '' : parent.value));
+}
+
+function maaControlIdParts(id) {
+  const m = /^(?:chk|sel|ipt)_maa_sub_(\d+)_(\d+)$/.exec(id || '');
+  return m ? { taskIdx: Number(m[1]), subIdx: Number(m[2]) } : null;
+}
+
+// 读取某任务全部子选项的实时值（隐藏的依赖选项控件仍在 DOM 中，值不丢失）
+function maaLiveSubOptions(taskIdx, task) {
+  return (task.sub_options || []).map((sub, sIdx) => {
+    let value = sub.value;
+    if (sub.type === 'select') {
+      const el = document.getElementById(`sel_maa_sub_${taskIdx}_${sIdx}`);
+      if (el) value = el.value;
+    } else if (sub.type === 'input') {
+      const el = document.getElementById(`ipt_maa_sub_${taskIdx}_${sIdx}`);
+      if (el) value = el.value;
+    } else {
+      const el = document.getElementById(`chk_maa_sub_${taskIdx}_${sIdx}`);
+      if (el) value = el.checked;
+    }
+    // Keep dependency metadata (and any other option fields) intact so the same
+    // ancestor-chain rules apply during live refresh as during initial render.
+    return { ...sub, value };
+  });
+}
+
+// 父选项值变化后刷新该任务内依赖选项的实时显隐
+function refreshMAADependents(taskIdx) {
+  const task = currentMAAData && currentMAAData.tasks ? currentMAAData.tasks[taskIdx] : null;
+  if (!task || !task.sub_options) return;
+  const live = maaLiveSubOptions(taskIdx, task);
+  task.sub_options.forEach((sub, sIdx) => {
+    if (!sub.depends_on) return;
+    const row = document.getElementById(`maa_sub_row_${taskIdx}_${sIdx}`);
+    if (row) row.style.display = isSubOptionVisible(sub, live) ? 'flex' : 'none';
+  });
+}
+
+// 条目操作防并发：复制/重命名请求在途时忽略重复点击并禁用入口按钮
+let maaEntryOpBusy = false;
+function setMAAEntryOpsDisabled(disabled) {
+  document.querySelectorAll('#maaTaskListContainer [data-entry-action]').forEach(btn => {
+    try { btn.disabled = disabled; } catch (e) {}
+  });
+}
+
+// 条目操作前的未保存修改守卫：复制/重命名成功后面板会从服务端重载，
+// 若面板上有未保存的编辑（与 maaSnapshot 不一致），必须先经用户确认，避免静默丢弃
+async function confirmDiscardUnsavedMAAEdits(actionLabel) {
+  if (!maaSnapshot || maaSnapshot === formSnapshot('maaConfigModal')) return true;
+  return await confirmAction(`${actionLabel}会先重载面板，未保存的修改将被放弃，继续吗？`);
+}
+
+// 条目重命名（合约 5）：空串表示清除别名
+async function renameMAAEntry(entryId) {
+  if (maaEntryOpBusy) return; // 处理中忽略重复点击
+  if (!currentMAATaskID || !entryId) return;
+  maaEntryOpBusy = true;
+  setMAAEntryOpsDisabled(true);
+  try {
+    if (!await confirmDiscardUnsavedMAAEdits('重命名')) return;
+    const task = ((currentMAAData && currentMAAData.tasks) || []).find(t => t.entry_id === entryId);
+    const current = task ? (task.display_name || '') : '';
+    const answer = typeof globalThis.prompt === 'function'
+      ? globalThis.prompt('输入该条目的显示名（留空清除别名）：', current)
+      : null;
+    if (answer === null) return; // 用户取消
+    await requestAPI(`/api/v1/tasks/${encodeURIComponent(currentMAATaskID)}/maa/task-entries/${encodeURIComponent(entryId)}/alias`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ display_name: String(answer).trim(), config_id: currentSelectedProfileID })
+    });
+    notifyUser('显示名已更新');
+    await loadMAAConfig(currentMAATaskID, currentSelectedProfileID);
+  } catch (e) {
+    notifyUser('重命名失败: ' + (e.message || String(e)), true);
+  } finally {
+    maaEntryOpBusy = false;
+    setMAAEntryOpsDisabled(false);
+  }
+}
+
+// 复制条目（合约 4）：成功后刷新面板并定位新条目
+async function duplicateMAAEntry(entryId) {
+  if (maaEntryOpBusy) return; // 处理中忽略重复点击
+  if (!currentMAATaskID || !entryId) return;
+  maaEntryOpBusy = true;
+  setMAAEntryOpsDisabled(true);
+  try {
+    if (!await confirmDiscardUnsavedMAAEdits('复制任务')) return;
+    const data = await requestAPI(`/api/v1/tasks/${encodeURIComponent(currentMAATaskID)}/maa/task-entries/duplicate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entry_id: entryId, config_id: currentSelectedProfileID })
+    });
+    notifyUser((data && data.message) || '已复制任务条目');
+    await loadMAAConfig(currentMAATaskID, currentSelectedProfileID);
+    if (data && data.entry_id) locateMAAEntry(data.entry_id);
+  } catch (e) {
+    notifyUser('复制失败: ' + (e.message || String(e)), true);
+  } finally {
+    maaEntryOpBusy = false;
+    setMAAEntryOpsDisabled(false);
+  }
+}
+
+// 滚动定位并短暂高亮指定条目（同名多条目场景下辨认新条目）
+function locateMAAEntry(entryId) {
+  const tasks = (currentMAAData && currentMAAData.tasks) || [];
+  const idx = tasks.findIndex(t => t.entry_id === entryId);
+  if (idx < 0) return;
+  const row = document.getElementById(`maa_task_item_${idx}`);
+  if (!row) return;
+  if (typeof row.scrollIntoView === 'function') {
+    try { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { try { row.scrollIntoView(); } catch (e2) {} }
+  }
+  try {
+    row.style.outline = '2px solid #3b82f6';
+    setTimeout(() => { row.style.outline = ''; }, 1600);
+  } catch (e) {}
 }
 
 function maaToggleAll(enabled) {
@@ -1044,6 +1261,7 @@ async function saveMAAConfig() {
       };
     });
     return {
+      entry_id: t.entry_id || '',
       name: t.name,
       enabled: chk ? chk.checked : t.enabled,
       sub_options: subOptions

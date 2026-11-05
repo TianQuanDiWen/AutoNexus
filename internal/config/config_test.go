@@ -7,6 +7,24 @@ import (
 	"time"
 )
 
+func TestUpdateTaskMAABindingPreservesOtherFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	mgr, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.AddTask(&TaskConfig{ID: "binding-task", Name: "keep me", Executable: "game.exe", Args: []string{"--keep"}, MAAConfigID: "old", MAAConfigName: "old name"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.UpdateTaskMAABinding("binding-task", "new", "new name"); err != nil {
+		t.Fatal(err)
+	}
+	task := mgr.Get().Tasks[0]
+	if task.MAAConfigID != "new" || task.MAAConfigName != "new name" || task.Name != "keep me" || len(task.Args) != 1 || task.Args[0] != "--keep" {
+		t.Fatalf("field update changed unrelated task data: %+v", task)
+	}
+}
+
 func TestDefaultConfigLocalOnly(t *testing.T) {
 	// 默认配置：仅本机访问 + 未设密码
 	def := DefaultConfig()
@@ -124,6 +142,63 @@ func TestDailyCycleCalculations(t *testing.T) {
 	waitDurPassed := GetWaitDurationUntilRefresh("04:00", nowA)
 	if waitDurPassed != 0 {
 		t.Fatalf("wait duration passed should be 0, got %v", waitDurPassed)
+	}
+}
+
+// TestTaskMaaEntryAliasesTransparency MXU 条目显示名映射的透传：Get 深拷贝隔离、UpdateTask 零值回退、落盘持久化
+func TestTaskMaaEntryAliasesTransparency(t *testing.T) {
+	tempDir := t.TempDir()
+	cfgPath := filepath.Join(tempDir, "config.json")
+	mgr, err := NewManager(cfgPath)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	if err := mgr.AddTask(&TaskConfig{
+		ID:              "alias_task",
+		Name:            "制衣任务",
+		Executable:      "cmd.exe",
+		MaaEntryAliases: map[string]string{"q4vuql0": "制衣-上衣"},
+	}); err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	// 1. Get 返回的副本携带映射
+	got := mgr.Get().Tasks[0]
+	if got.MaaEntryAliases["q4vuql0"] != "制衣-上衣" {
+		t.Fatalf("MaaEntryAliases should be passed through Get, got %+v", got.MaaEntryAliases)
+	}
+
+	// 2. 修改返回副本的映射不得波及 Manager 内部状态（Get 深拷贝）
+	got.MaaEntryAliases["q4vuql0"] = "mutated"
+	if v := mgr.Get().Tasks[0].MaaEntryAliases["q4vuql0"]; v != "制衣-上衣" {
+		t.Fatalf("Mutating the returned copy must not affect manager state, got %q", v)
+	}
+
+	// 3. UpdateTask 未携带映射（nil）→ 回退旧值（既有"零值回退"模式）
+	if err := mgr.UpdateTask(&TaskConfig{ID: "alias_task", Name: "改名后的制衣任务", Executable: "cmd.exe"}); err != nil {
+		t.Fatalf("UpdateTask failed: %v", err)
+	}
+	if v := mgr.Get().Tasks[0].MaaEntryAliases["q4vuql0"]; v != "制衣-上衣" {
+		t.Fatalf("Nil alias map on update should fall back to old value, got %q", v)
+	}
+
+	// 4. UpdateTask 携带新映射 → 覆盖
+	if err := mgr.UpdateTask(&TaskConfig{ID: "alias_task", Executable: "cmd.exe", MaaEntryAliases: map[string]string{"vwd11s4": "制衣-下装"}}); err != nil {
+		t.Fatalf("UpdateTask failed: %v", err)
+	}
+	aliases := mgr.Get().Tasks[0].MaaEntryAliases
+	if len(aliases) != 1 || aliases["vwd11s4"] != "制衣-下装" {
+		t.Fatalf("Explicit alias map should replace old one, got %+v", aliases)
+	}
+
+	// 5. 落盘持久化：重载后仍在
+	reloaded, err := NewManager(cfgPath)
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if v := reloaded.Get().Tasks[0].MaaEntryAliases["vwd11s4"]; v != "制衣-下装" {
+		t.Fatalf("Aliases should persist to config.json, got %+v", reloaded.Get().Tasks[0].MaaEntryAliases)
 	}
 }
 

@@ -186,6 +186,7 @@ header {
 .status-body {
   margin:0;
   display:flex;
+  flex-wrap:wrap;
   align-items:center;
   gap:14px;
   min-width:0;
@@ -296,7 +297,7 @@ header {
 }
 .task-card {
   padding:12px 8px;
-  min-height:82px;
+  min-height:90px;
   border:0;
   border-bottom:1px solid var(--card-border);
   border-radius:0;
@@ -348,10 +349,18 @@ header {
 .task-sub {
   font-size:11px;
   color:var(--text-muted);
-  margin-top:4px;
+  margin-top:3px;
   white-space:nowrap;
   text-overflow:ellipsis;
   overflow:hidden;
+}
+.task-start {
+  margin-top:2px;
+  color:var(--text-muted);
+  font-size:10px;
+  line-height:1.2;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
 }
 .task-footer {
   grid-column:2;

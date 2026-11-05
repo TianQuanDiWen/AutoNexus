@@ -31,6 +31,7 @@ type StatusSnapshot struct {
 	CurrentTaskIndex      int                    `json:"current_task_index"`
 	TotalTasksCount       int                    `json:"total_tasks_count"`
 	ElapsedSeconds        int64                  `json:"elapsed_seconds"`
+	TotalElapsedSeconds   int64                  `json:"total_elapsed_seconds"`
 	CooldownRemaining     int                    `json:"cooldown_remaining"`
 	ScheduleWaitRemaining int64                  `json:"schedule_wait_remaining,omitempty"`
 	ScheduleWaitTarget    string                 `json:"schedule_wait_target,omitempty"`
@@ -52,6 +53,8 @@ type Engine struct {
 	currentTaskName       string
 	currentTaskIndex      int
 	taskStartTime         time.Time
+	totalStartTime        time.Time
+	totalElapsedSeconds   int64
 	cooldownRemaining     int
 	scheduleWaitRemaining int64
 	scheduleWaitTarget    string
@@ -111,6 +114,10 @@ func (e *Engine) GetStatus() StatusSnapshot {
 	if !e.taskStartTime.IsZero() && (e.state == StateRunning || e.state == StateCooling) {
 		elapsed = int64(time.Since(e.taskStartTime).Seconds())
 	}
+	totalElapsed := e.totalElapsedSeconds
+	if !e.totalStartTime.IsZero() && e.state != StateIdle {
+		totalElapsed = int64(time.Since(e.totalStartTime).Seconds())
+	}
 
 	resultsCopy := make([]*executor.TaskResult, len(e.lastResults))
 	copy(resultsCopy, e.lastResults)
@@ -139,6 +146,7 @@ func (e *Engine) GetStatus() StatusSnapshot {
 		CurrentTaskIndex:      e.currentTaskIndex,
 		TotalTasksCount:       len(cfg.Tasks),
 		ElapsedSeconds:        elapsed,
+		TotalElapsedSeconds:   totalElapsed,
 		CooldownRemaining:     e.cooldownRemaining,
 		ScheduleWaitRemaining: e.scheduleWaitRemaining,
 		ScheduleWaitTarget:    e.scheduleWaitTarget,
@@ -164,6 +172,8 @@ func (e *Engine) StartQueue(force bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancelFunc = cancel
 	e.state = StatePrepare
+	e.totalStartTime = time.Now()
+	e.totalElapsedSeconds = 0
 	e.lastResults = make([]*executor.TaskResult, 0)
 	e.mu.Unlock()
 
@@ -220,6 +230,8 @@ func (e *Engine) RunSingleTask(taskID string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancelFunc = cancel
 	e.state = StatePrepare
+	e.totalStartTime = time.Now()
+	e.totalElapsedSeconds = 0
 	e.lastResults = make([]*executor.TaskResult, 0)
 	e.mu.Unlock()
 
@@ -238,6 +250,8 @@ func (e *Engine) RunSingleTask(taskID string) error {
 			e.scheduleWaitRemaining = 0
 			e.scheduleWaitTarget = ""
 			e.taskStartTime = time.Time{}
+			e.totalElapsedSeconds = int64(time.Since(e.totalStartTime).Seconds())
+			e.totalStartTime = time.Time{}
 			e.cancelFunc = nil
 			e.mu.Unlock()
 			e.broadcaster.EmitSystemLog("SCHEDULER", "================ 单项任务执行完毕，回到待命状态 ================")
@@ -278,6 +292,8 @@ func (e *Engine) runQueueLoop(ctx context.Context, force bool) {
 		e.currentTaskName = ""
 		e.currentTaskIndex = 0
 		e.taskStartTime = time.Time{}
+		e.totalElapsedSeconds = int64(time.Since(e.totalStartTime).Seconds())
+		e.totalStartTime = time.Time{}
 		e.cooldownRemaining = 0
 		e.scheduleWaitRemaining = 0
 		e.scheduleWaitTarget = ""
@@ -422,7 +438,8 @@ func (e *Engine) executeOneTask(ctx context.Context, task *config.TaskConfig, id
 
 	// 若该任务指定了 MAA 执行配置预设，确保在启动该进程前激活该预设
 	if task.MAAConfigID != "" {
-		if err := maa.EnsureActiveProfile(task.WorkingDir, task.Executable, task.MAAConfigID); err != nil {
+		resolvedID, resolvedName, rebound, err := maa.ResolveActiveProfile(task.WorkingDir, task.Executable, task.MAAConfigID, task.MAAConfigName)
+		if err != nil {
 			errStr := fmt.Sprintf("激活 MAA 预设失败: %v", err)
 			e.broadcaster.EmitSystemLog("SCHEDULER", fmt.Sprintf("❌ [MAA] %s", errStr))
 			res := &executor.TaskResult{
@@ -437,8 +454,16 @@ func (e *Engine) executeOneTask(ctx context.Context, task *config.TaskConfig, id
 			e.lastResults = append(e.lastResults, res)
 			e.mu.Unlock()
 			return res
-		} else if task.MAAConfigName != "" {
-			e.broadcaster.EmitSystemLog("SCHEDULER", fmt.Sprintf("🎯 [MAA] 已激活执行预设: %s", task.MAAConfigName))
+		}
+		if rebound {
+			if err := e.configMgr.UpdateTaskMAABinding(task.ID, resolvedID, resolvedName); err != nil {
+				e.broadcaster.EmitSystemLog("SCHEDULER", fmt.Sprintf("⚠️ [MAA] 已迁移预设绑定至 %s (%s)，但保存绑定失败: %v", resolvedName, resolvedID, err))
+			} else {
+				task.MAAConfigID, task.MAAConfigName = resolvedID, resolvedName
+				e.broadcaster.EmitSystemLog("SCHEDULER", fmt.Sprintf("🔄 [MAA] 预设 ID 已变化，绑定已迁移: %s (%s)", resolvedName, resolvedID))
+			}
+		} else if resolvedName != "" {
+			e.broadcaster.EmitSystemLog("SCHEDULER", fmt.Sprintf("🎯 [MAA] 已激活执行预设: %s", resolvedName))
 		}
 	}
 

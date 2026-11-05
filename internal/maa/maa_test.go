@@ -2,11 +2,42 @@ package maa
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// writeMXUProject 在临时目录构造一个可被 DetectProject 识别的 MXU 项目
+func writeMXUProject(t *testing.T, interfaceJSON, mxuJSON string) (dir string, proj *ProjectInfo) {
+	t.Helper()
+	dir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "interface.json"), []byte(interfaceJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var pi struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(interfaceJSON), &pi); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "config"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config", fmt.Sprintf("mxu-%s.json", pi.Name))
+	if err := os.WriteFile(cfgPath, []byte(mxuJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := DetectProject(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, proj
+}
 
 func TestMAADetectAndConfigLifecycle(t *testing.T) {
 	tempDir := t.TempDir()
@@ -911,5 +942,841 @@ func TestMAAPISavePreservesTaskOrder(t *testing.T) {
 
 	if t0 != "TaskB" || t1 != "TaskA" || t2 != "TaskC" {
 		t.Fatalf("Bug 3 regressed: Task order was altered! Got: [%s, %s, %s], expected [TaskB, TaskA, TaskC]", t0, t1, t2)
+	}
+}
+
+// TestEnsureActiveProfileMXUMissingListsAvailable 检查 MXU 预设不存在时报错携带当前可用实例列表，
+// 且错误前缀「指定的 MXU 预设不存在: <id>」保持原样（上层 engine 依赖激活失败链路）
+func TestEnsureActiveProfileMXUMissingListsAvailable(t *testing.T) {
+	interfaceJSON := `{"name":"BindTest","task":[{"name":"TaskA","label":"任务A"}]}`
+	mxuJSON := `{
+	  "instances": [
+	    {"id": "k2qskdc", "name": "默认配置", "tasks": []}
+	  ],
+	  "lastActiveInstanceId": "k2qskdc"
+	}`
+	dir, _ := writeMXUProject(t, interfaceJSON, mxuJSON)
+
+	err := EnsureActiveProfile(dir, "", "zjjlz3y")
+	if err == nil {
+		t.Fatal("Expected error for non-existent MXU profile ID")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "指定的 MXU 预设不存在: zjjlz3y") {
+		t.Fatalf("Error prefix must stay intact, got: %s", msg)
+	}
+	if !strings.Contains(msg, "k2qskdc=默认配置") {
+		t.Fatalf("Error should list available instances (id=name), got: %s", msg)
+	}
+	if !strings.Contains(msg, "当前可用") {
+		t.Fatalf("Error should carry 当前可用 marker, got: %s", msg)
+	}
+
+	// 报错路径不得改写活跃实例
+	raw, err := os.ReadFile(filepath.Join(dir, "config", "mxu-BindTest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"lastActiveInstanceId": "k2qskdc"`) {
+		t.Fatalf("Active instance should be untouched on failure: %s", raw)
+	}
+}
+
+func TestResolveActiveProfileMigratesUniqueMXUProfile(t *testing.T) {
+	interfaceJSON := `{"name":"BindTest","task":[]}`
+	mxuJSON := `{"instances":[{"id":"ve74oyg","name":"默认配置","tasks":[]}],"lastActiveInstanceId":"ve74oyg"}`
+	dir, _ := writeMXUProject(t, interfaceJSON, mxuJSON)
+	id, name, rebound, err := ResolveActiveProfile(dir, "", "calof4n", "旧名称")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "ve74oyg" || name != "默认配置" || !rebound {
+		t.Fatalf("unexpected migration: id=%q name=%q rebound=%v", id, name, rebound)
+	}
+}
+
+func TestResolveActiveProfileUsesUniqueNameAndRejectsAmbiguity(t *testing.T) {
+	interfaceJSON := `{"name":"BindTest","task":[]}`
+	dir, _ := writeMXUProject(t, interfaceJSON, `{"instances":[{"id":"newid01","name":"Work","tasks":[]},{"id":"other01","name":"Other","tasks":[]}]}`)
+	id, name, rebound, err := ResolveActiveProfile(dir, "", "oldid01", "Work")
+	if err != nil || id != "newid01" || name != "Work" || !rebound {
+		t.Fatalf("unique name match failed: %q %q %v %v", id, name, rebound, err)
+	}
+	dir, _ = writeMXUProject(t, interfaceJSON, `{"instances":[{"id":"newid01","name":"Work","tasks":[]},{"id":"other01","name":"Work","tasks":[]}],"lastActiveInstanceId":"other01"}`)
+	if _, _, _, err := ResolveActiveProfile(dir, "", "oldid01", "Work"); err == nil || !strings.Contains(err.Error(), "多个 MXU 预设") {
+		t.Fatalf("expected ambiguity error, got %v", err)
+	}
+	assertMXUActiveID(t, dir, "BindTest", "other01")
+}
+
+func TestResolveActiveProfilePrefersExistingIDOverName(t *testing.T) {
+	interfaceJSON := `{"name":"BindTest","task":[]}`
+	dir, _ := writeMXUProject(t, interfaceJSON, `{"instances":[{"id":"saved01","name":"Renamed","tasks":[]},{"id":"other01","name":"Work","tasks":[]}],"lastActiveInstanceId":"other01"}`)
+	id, name, rebound, err := ResolveActiveProfile(dir, "", "saved01", "Work")
+	if err != nil || id != "saved01" || name != "Renamed" || rebound {
+		t.Fatalf("existing ID must win over stale name: id=%q name=%q rebound=%v err=%v", id, name, rebound, err)
+	}
+	assertMXUActiveID(t, dir, "BindTest", "saved01")
+}
+
+func TestResolveActiveProfileRejectsCorruptMXUWithoutMigration(t *testing.T) {
+	interfaceJSON := `{"name":"BindTest","task":[]}`
+	for _, tc := range []struct{ name, data string }{
+		{name: "invalid JSON", data: `{"instances":`},
+		{name: "invalid sole instance", data: `{"instances":[null]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, proj := writeMXUProject(t, interfaceJSON, `{"instances":[{"id":"valid01","name":"Only","tasks":[]}],"lastActiveInstanceId":"valid01"}`)
+			if err := os.WriteFile(proj.ConfigPath, []byte(tc.data), 0644); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Fatalf("ResolveActiveProfile panicked: %v", recovered)
+				}
+			}()
+			if _, _, _, err := ResolveActiveProfile(dir, "", "missing1", "Old"); err == nil {
+				t.Fatal("expected malformed MXU config error")
+			}
+			got, err := os.ReadFile(proj.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tc.data {
+				t.Fatalf("malformed config must remain untouched, got %s", got)
+			}
+		})
+	}
+}
+
+func TestResolveActiveProfileMFAAMatchesDisplayName(t *testing.T) {
+	dir := writeMFAAProject(t, "current", `{"config_list":["cfg_a","cfg_b"],"curr_config_id":"current"}`, map[string]string{
+		"cfg_a":   `{"name":"Daily","tasks":[]}`,
+		"cfg_b":   `{"name":"Weekly","tasks":[]}`,
+		"current": `{"name":"Current","tasks":[]}`,
+	})
+	id, name, rebound, err := ResolveActiveProfile(dir, "", "old_id", "Daily")
+	if err != nil || id != "cfg_a" || name != "Daily" || !rebound {
+		t.Fatalf("MFAA should resolve saved display name, got id=%q name=%q rebound=%v err=%v", id, name, rebound, err)
+	}
+	assertMFAAActiveID(t, dir, "cfg_a")
+}
+
+func TestResolveActiveProfileMFAARejectsDuplicateDisplayNames(t *testing.T) {
+	dir := writeMFAAProject(t, "current", `{"config_list":["cfg_a","cfg_b"],"curr_config_id":"current"}`, map[string]string{
+		"cfg_a":   `{"name":"Daily","tasks":[]}`,
+		"cfg_b":   `{"name":"Daily","tasks":[]}`,
+		"current": `{"name":"Current","tasks":[]}`,
+	})
+	if _, _, _, err := ResolveActiveProfile(dir, "", "old_id", "Daily"); err == nil || !strings.Contains(err.Error(), "多个 MFAA 预设") || !strings.Contains(err.Error(), "cfg_a=Daily") || !strings.Contains(err.Error(), "cfg_b=Daily") {
+		t.Fatalf("expected duplicate display-name error with available names, got %v", err)
+	}
+	assertMFAAActiveID(t, dir, "current")
+}
+
+func TestResolveActiveProfileMFAAPrefersExistingID(t *testing.T) {
+	dir := writeMFAAProject(t, "other", `{"config_list":["saved_id","other"],"curr_config_id":"other"}`, map[string]string{
+		"saved_id": `{"name":"Current Name","tasks":[]}`,
+		"other":    `{"name":"Saved Name","tasks":[]}`,
+	})
+	id, name, rebound, err := ResolveActiveProfile(dir, "", "saved_id", "Saved Name")
+	if err != nil || id != "saved_id" || name != "Current Name" || rebound {
+		t.Fatalf("existing MFAA ID must win over saved display name, got id=%q name=%q rebound=%v err=%v", id, name, rebound, err)
+	}
+	assertMFAAActiveID(t, dir, "saved_id")
+}
+
+func TestResolveActiveProfileMFAAPropagatesCandidateParseErrors(t *testing.T) {
+	dir := writeMFAAProject(t, "current", `{"config_list":["cfg_a","cfg_b"],"curr_config_id":"current"}`, map[string]string{
+		"cfg_a":   `{"name":"Daily","tasks":[]}`,
+		"cfg_b":   `{"name":`,
+		"current": `{"name":"Current","tasks":[]}`,
+	})
+	if _, _, _, err := ResolveActiveProfile(dir, "", "old_id", "Daily"); err == nil || !strings.Contains(err.Error(), "解析 MFAA 预设 cfg_b 失败") {
+		t.Fatalf("malformed candidate must not be silently ignored, got %v", err)
+	}
+	assertMFAAActiveID(t, dir, "current")
+}
+
+func writeMFAAProject(t *testing.T, currentID, multiJSON string, configs map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "interface.json"), []byte(`{"name":"MFAAResolve"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	configDir := filepath.Join(dir, "config")
+	profilesDir := filepath.Join(configDir, "configs")
+	if err := os.MkdirAll(profilesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "multi_config.json"), []byte(multiJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for id, data := range configs {
+		if err := os.WriteFile(filepath.Join(profilesDir, id+".json"), []byte(data), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(profilesDir, currentID+".json")); err != nil {
+		t.Fatalf("current MFAA config fixture missing: %v", err)
+	}
+	return dir
+}
+
+func assertMFAAActiveID(t *testing.T, dir, expected string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "config", "multi_config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root struct {
+		Current string `json:"curr_config_id"`
+	}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if root.Current != expected {
+		t.Fatalf("curr_config_id changed: got %q, want %q", root.Current, expected)
+	}
+}
+
+func TestConfigFileLockKeyNormalizesPathAliases(t *testing.T) {
+	dir, err := os.MkdirTemp(".", ".maa-lock-key-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(workingDir, absolute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configFileLockKey(absolute) != configFileLockKey(relative) {
+		t.Fatalf("absolute and relative aliases differ: %q vs %q", configFileLockKey(absolute), configFileLockKey(relative))
+	}
+	caseVariant := strings.ToUpper(absolute)
+	if runtime.GOOS == "windows" {
+		if configFileLockKey(absolute) != configFileLockKey(caseVariant) {
+			t.Fatalf("Windows case aliases differ")
+		}
+	} else if absolute != caseVariant && configFileLockKey(absolute) == configFileLockKey(caseVariant) {
+		t.Fatalf("case-sensitive platform folded distinct paths")
+	}
+}
+
+func TestDuplicateTaskEntrySerializesWindowsPathAliases(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows path alias semantics")
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(root, ".maa-lock-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.WriteFile(filepath.Join(dir, "interface.json"), []byte(`{"name":"LockAlias"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "config"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config", "mxu-LockAlias.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"instances":[{"id":"profile1","name":"Default","tasks":[{"id":"entry01","taskName":"Task","enabled":true}]}]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := DetectProject(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	absPath, err := filepath.Abs(proj.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relPath, err := filepath.Rel(root, absPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{absPath, strings.ToUpper(absPath), relPath, filepath.ToSlash(strings.ToUpper(relPath))}
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
+	for _, alias := range paths {
+		wg.Add(1)
+		go func(alias string) {
+			defer wg.Done()
+			copy := *proj
+			copy.ConfigPath = alias
+			if _, err := DuplicateTaskEntry(&copy, "profile1", "entry01"); err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+			}
+		}(alias)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		t.Fatal(firstErr)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		Instances []struct {
+			Tasks []any `json:"tasks"`
+		} `json:"instances"`
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Instances) != 1 {
+		t.Fatalf("unexpected instance count after concurrent copies: got %d, want 1", len(saved.Instances))
+	}
+	if len(saved.Instances[0].Tasks) != 5 {
+		t.Fatalf("concurrent copies lost updates: got task count %d, want 5", len(saved.Instances[0].Tasks))
+	}
+}
+
+func assertMXUActiveID(t *testing.T, dir, projectName, expected string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "config", "mxu-"+projectName+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root struct {
+		LastActive string `json:"lastActiveInstanceId"`
+	}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if root.LastActive != expected {
+		t.Fatalf("lastActiveInstanceId changed: got %q, want %q", root.LastActive, expected)
+	}
+}
+
+// TestEnsureActiveProfileMFAAMissingListsAvailable 检查 MFAA 预设不存在时报错携带可用列表。
+func TestEnsureActiveProfileMFAAMissingListsAvailable(t *testing.T) {
+	tempDir := t.TempDir()
+	interfaceJSON := `{"name":"MFAABind","task":[{"name":"TaskA","label":"任务A"}]}`
+	if err := os.WriteFile(filepath.Join(tempDir, "interface.json"), []byte(interfaceJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tempDir, "config", "configs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	multiCfg := `{"curr_config_id":"c_default","config_list":["c_default","c_profile_a"]}`
+	if err := os.WriteFile(filepath.Join(tempDir, "config", "multi_config.json"), []byte(multiCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "config", "configs", "c_default.json"), []byte(`{"name":"Default","tasks":[]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "config", "configs", "c_profile_a.json"), []byte(`{"name":"ProfileA","tasks":[]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := EnsureActiveProfile(tempDir, "", "c_ghost")
+	if err == nil {
+		t.Fatal("Expected error for non-existent MFAA profile ID")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "指定的 MFAA 预设不存在: c_ghost") {
+		t.Fatalf("Error prefix must stay intact, got: %s", msg)
+	}
+	if !strings.Contains(msg, "当前可用: c_default, c_profile_a") {
+		t.Fatalf("Error should list available configs, got: %s", msg)
+	}
+
+	// 目录不存在时摘要为空（调用方保持原报错）
+	if got := summarizeMFAAConfigs(filepath.Join(tempDir, "config", "not-exist")); got != "" {
+		t.Fatalf("summarizeMFAAConfigs should return empty for missing dir, got %q", got)
+	}
+}
+
+// TestSaveConfigMXUMissingProfileListsAvailable 检查保存不存在的 MXU 预设时同样追加可用列表。
+func TestSaveConfigMXUMissingProfileListsAvailable(t *testing.T) {
+	interfaceJSON := `{"name":"BindSave","task":[{"name":"TaskA","label":"任务A"}]}`
+	mxuJSON := `{
+	  "instances": [
+	    {"id": "inst_1", "name": "正常预设", "tasks": [{"id":"e1","taskName":"TaskA","enabled":true}]}
+	  ],
+	  "lastActiveInstanceId": "inst_1"
+	}`
+	_, proj := writeMXUProject(t, interfaceJSON, mxuJSON)
+
+	req := &TaskUpdateRequest{
+		ConfigID: "ghost_id",
+		Tasks:    []TaskUpdateItem{{Name: "TaskA", Enabled: false}},
+	}
+	err := SaveConfig(proj, req)
+	if err == nil {
+		t.Fatal("Expected error for non-existent MXU profile ID")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "未找到指定的 MXU 配置预设: ghost_id") {
+		t.Fatalf("Error prefix must stay intact, got: %s", msg)
+	}
+	if !strings.Contains(msg, "inst_1=正常预设") {
+		t.Fatalf("Error should list available instances, got: %s", msg)
+	}
+
+	// 保存失败时原文件不得被改动
+	raw, _ := os.ReadFile(proj.ConfigPath)
+	if !strings.Contains(string(raw), `"lastActiveInstanceId": "inst_1"`) || !strings.Contains(string(raw), `"taskName":"TaskA"`) {
+		t.Fatalf("Config file should be untouched on failure: %s", raw)
+	}
+}
+
+// TestGetConfigViewNestedDependentOptions 检查 case 级嵌套依赖选项渲染为带 depends_on/show_when 的
+// SubOptionItem，值仍按扁平 optionValues 键读写（如 key=方法）
+func TestGetConfigViewNestedDependentOptions(t *testing.T) {
+	interfaceJSON := `{
+	  "name": "NestTest",
+	  "task": [{"name":"Fight","label":"战斗","default_check":true,"option":["指示"]}],
+	  "option": {
+	    "指示": {
+	      "type": "switch",
+	      "label": "作战指示",
+	      "cases": [
+	        {"name": "Yes", "label": "开启", "option": ["方法"]},
+	        {"name": "No", "label": "关闭"}
+	      ]
+	    },
+	    "方法": {
+	      "type": "select",
+	      "label": "攻击方法",
+	      "cases": ["A", "B"],
+	      "default_case": "A"
+	    }
+	  }
+	}`
+	mxuJSON := `{
+	  "instances": [{"id":"inst_1","name":"默认","tasks":[
+	    {"id":"e1","taskName":"Fight","enabled":true,
+	     "optionValues":{"指示":{"type":"switch","value":true},"方法":{"type":"select","caseName":"B"}}}
+	  ]}],
+	  "lastActiveInstanceId":"inst_1"
+	}`
+	_, proj := writeMXUProject(t, interfaceJSON, mxuJSON)
+
+	view, err := GetConfigView(proj, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Tasks) != 1 {
+		t.Fatalf("Expected 1 task, got %d", len(view.Tasks))
+	}
+	subs := view.Tasks[0].SubOptions
+	if len(subs) != 2 {
+		t.Fatalf("Expected parent + nested sub-options, got %+v", subs)
+	}
+	parent := subs[0]
+	if parent.Name != "指示" || parent.DependsOn != "" || len(parent.ShowWhen) != 0 {
+		t.Fatalf("Top-level option must not carry depends_on/show_when: %+v", parent)
+	}
+	child := subs[1]
+	if child.Name != "方法" {
+		t.Fatalf("Expected nested option 方法, got %+v", child)
+	}
+	if child.DependsOn != "指示" {
+		t.Fatalf("depends_on should point to parent option, got %q", child.DependsOn)
+	}
+	if len(child.ShowWhen) != 1 || child.ShowWhen[0] != "Yes" {
+		t.Fatalf("show_when should be parent case names, got %v", child.ShowWhen)
+	}
+	if child.Value != "B" {
+		t.Fatalf("Nested option value should be read by flat optionValues key, got %v", child.Value)
+	}
+
+	// 扁平键写回：按 taskName 匹配（更新项未携带 entry_id，回退旧兼容路径）
+	req := &TaskUpdateRequest{
+		ConfigID: "inst_1",
+		Tasks: []TaskUpdateItem{{
+			Name:       "Fight",
+			Enabled:    true,
+			SubOptions: []SubOptionUpdate{{Name: "方法", Type: "select", Value: "A"}},
+		}},
+	}
+	if err := SaveConfig(proj, req); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(proj.ConfigPath)
+	var disk struct {
+		Instances []struct {
+			Tasks []map[string]any `json:"tasks"`
+		} `json:"instances"`
+	}
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		t.Fatal(err)
+	}
+	optVals := disk.Instances[0].Tasks[0]["optionValues"].(map[string]any)
+	methodOpt := optVals["方法"].(map[string]any)
+	if methodOpt["caseName"] != "A" {
+		t.Fatalf("Nested option should be saved under flat key, got %+v", methodOpt)
+	}
+	if _, exists := optVals["指示"]; !exists {
+		t.Fatalf("Parent option value must be preserved: %+v", optVals)
+	}
+
+	viewAfter, err := GetConfigView(proj, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := viewAfter.Tasks[0].SubOptions[1]; got.Value != "A" || got.DependsOn != "指示" || len(got.ShowWhen) != 1 {
+		t.Fatalf("Nested option round trip mismatch: %+v", got)
+	}
+}
+
+// TestGetConfigViewNestedOptionCycleGuard 防环：A→B→A 循环引用不发散，同一条渲染链上已出现的选项不重复展开
+func TestGetConfigViewNestedOptionCycleGuard(t *testing.T) {
+	interfaceJSON := `{
+	  "name": "CycleTest",
+	  "task": [{"name":"Work","label":"工作","default_check":true,"option":["X"]}],
+	  "option": {
+	    "X": {"type":"switch","cases":[{"name":"Yes","option":["Y"]},{"name":"No"}]},
+	    "Y": {"type":"switch","cases":[{"name":"On","option":["X"]},{"name":"Off"}]}
+	  }
+	}`
+	mxuJSON := `{
+	  "instances": [{"id":"inst_1","name":"默认","tasks":[
+	    {"id":"e1","taskName":"Work","enabled":true}
+	  ]}],
+	  "lastActiveInstanceId":"inst_1"
+	}`
+	_, proj := writeMXUProject(t, interfaceJSON, mxuJSON)
+
+	view, err := GetConfigView(proj, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subs := view.Tasks[0].SubOptions
+	if len(subs) != 2 {
+		t.Fatalf("Cycle should be cut: expected 2 sub-options, got %+v", subs)
+	}
+	if subs[0].Name != "X" || subs[1].Name != "Y" {
+		t.Fatalf("Unexpected sub-options: %+v", subs)
+	}
+	if subs[1].DependsOn != "X" || subs[1].ShowWhen[0] != "Yes" {
+		t.Fatalf("Nested Y metadata mismatch: %+v", subs[1])
+	}
+}
+
+// TestGetConfigViewMXUPerEntryRendering 多条目渲染：同名任务的多条目渲染为多个 TaskItem
+// （entry_id 各异、各自 optionValues 独立、display_name 来自别名映射）
+func TestGetConfigViewMXUPerEntryRendering(t *testing.T) {
+	interfaceJSON := `{
+	  "name": "EntryTest",
+	  "task": [
+	    {"name":"登陆","label":"登陆游戏","default_check":true},
+	    {"name":"制衣","label":"🧵 制衣","description":"可自行添加额外的制衣任务","default_check":true,
+	     "option":["ClothSlotOption"]},
+	    {"name":"任务","label":"任务奖励","default_check":true}
+	  ],
+	  "option": {
+	    "ClothSlotOption": {"type":"select","cases":["Slot1","Slot2","Slot5"],"default_case":"Slot1"}
+	  }
+	}`
+	mxuJSON := `{
+	  "instances": [{"id":"k2qskdc","name":"默认配置","tasks":[
+	    {"id":"aaa1111","taskName":"登陆","enabled":true},
+	    {"id":"q4vuql0","taskName":"制衣","enabled":true,
+	     "optionValues":{"ClothSlotOption":{"type":"select","caseName":"Slot2"}}},
+	    {"id":"vwd11s4","taskName":"制衣","enabled":false,
+	     "optionValues":{"ClothSlotOption":{"type":"select","caseName":"Slot5"}}}
+	  ]}],
+	  "lastActiveInstanceId":"k2qskdc"
+	}`
+	_, proj := writeMXUProject(t, interfaceJSON, mxuJSON)
+
+	aliases := map[string]string{"q4vuql0": "制衣-上衣"}
+	view, err := GetConfigViewWithAliases(proj, "", aliases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 4 个 TaskItem：登陆 + 制衣×2（逐条渲染，不再按 taskName 去重）+ 任务
+	if len(view.Tasks) != 4 {
+		t.Fatalf("Expected 4 TaskItems (entry-level rendering), got %d: %+v", len(view.Tasks), view.Tasks)
+	}
+	login := view.Tasks[0]
+	if login.Name != "登陆" || login.EntryID != "aaa1111" || !login.Enabled {
+		t.Fatalf("Login entry mismatch: %+v", login)
+	}
+	first := view.Tasks[1]
+	second := view.Tasks[2]
+	if first.Name != "制衣" || second.Name != "制衣" {
+		t.Fatalf("Both 制衣 entries should render, got %+v / %+v", first, second)
+	}
+	if first.EntryID != "q4vuql0" || second.EntryID != "vwd11s4" {
+		t.Fatalf("entry_id must differ per entry, got %s / %s", first.EntryID, second.EntryID)
+	}
+	if first.Enabled != true || second.Enabled != false {
+		t.Fatalf("Each entry keeps its own enabled state, got %+v / %+v", first.Enabled, second.Enabled)
+	}
+	if got := first.SubOptions[0]; got.Name != "ClothSlotOption" || got.Value != "Slot2" {
+		t.Fatalf("First entry option values mismatch: %+v", got)
+	}
+	if got := second.SubOptions[0]; got.Name != "ClothSlotOption" || got.Value != "Slot5" {
+		t.Fatalf("Second entry option values must not be merged/overwritten, got %+v", got)
+	}
+	if first.DisplayName != "制衣-上衣" {
+		t.Fatalf("display_name should come from alias map (key=entry_id), got %q", first.DisplayName)
+	}
+	if second.DisplayName != "" {
+		t.Fatalf("Entries without alias should have empty display_name, got %q", second.DisplayName)
+	}
+	noEntry := view.Tasks[3]
+	if noEntry.Name != "任务" || noEntry.EntryID != "" || noEntry.Enabled {
+		t.Fatalf("Task without entry should render disabled with empty entry_id, got %+v", noEntry)
+	}
+
+	// JSON 层面：entry_id/display_name 为 omitempty，无别名条目不输出 display_name
+	data, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"entry_id":"q4vuql0"`) || !strings.Contains(string(data), `"entry_id":"vwd11s4"`) {
+		t.Fatalf("entry_id missing in JSON output: %s", data)
+	}
+	if !strings.Contains(string(data), `"display_name":"制衣-上衣"`) {
+		t.Fatalf("display_name missing in JSON output: %s", data)
+	}
+	if strings.Count(string(data), `"display_name"`) != 1 {
+		t.Fatalf("display_name should only appear for aliased entries: %s", data)
+	}
+
+	// 普通 GetConfigView（不带别名）不输出 display_name
+	plain, err := GetConfigView(proj, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range plain.Tasks {
+		if task.DisplayName != "" {
+			t.Fatalf("Plain GetConfigView must not fill display_name: %+v", task)
+		}
+	}
+}
+
+// TestSaveConfigMXUByEntryID 按 entry_id 各自更新同名多条目，互不覆盖；旧兼容与误伤防护
+func TestSaveConfigMXUByEntryID(t *testing.T) {
+	interfaceJSON := `{
+	  "name": "SaveEntry",
+	  "task": [{"name":"制衣","label":"制衣","default_check":true,"option":["ClothSlotOption"]}],
+	  "option": {
+	    "ClothSlotOption": {"type":"select","cases":["Slot1","Slot2","Slot3","Slot5"],"default_case":"Slot1"}
+	  }
+	}`
+	mxuJSON := `{
+	  "instances": [{"id":"k2qskdc","name":"默认配置","tasks":[
+	    {"id":"q4vuql0","taskName":"制衣","enabled":true,
+	     "optionValues":{"ClothSlotOption":{"type":"select","caseName":"Slot2"}}},
+	    {"id":"vwd11s4","taskName":"制衣","enabled":true,
+	     "optionValues":{"ClothSlotOption":{"type":"select","caseName":"Slot5"}}}
+	  ]}],
+	  "lastActiveInstanceId":"k2qskdc"
+	}`
+
+	newFixture := func(t *testing.T) *ProjectInfo {
+		t.Helper()
+		_, proj := writeMXUProject(t, interfaceJSON, mxuJSON)
+		return proj
+	}
+	readEntry := func(t *testing.T, proj *ProjectInfo, entryID string) (bool, string) {
+		t.Helper()
+		raw, err := os.ReadFile(proj.ConfigPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var root struct {
+			Instances []struct {
+				Tasks []map[string]any `json:"tasks"`
+			} `json:"instances"`
+		}
+		if err := json.Unmarshal(raw, &root); err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range root.Instances[0].Tasks {
+			if id, _ := entry["id"].(string); id == entryID {
+				enabled, _ := entry["enabled"].(bool)
+				caseName := ""
+				if optVals, ok := entry["optionValues"].(map[string]any); ok {
+					if opt, ok := optVals["ClothSlotOption"].(map[string]any); ok {
+						caseName, _ = opt["caseName"].(string)
+					}
+				}
+				return enabled, caseName
+			}
+		}
+		t.Fatalf("entry %s not found on disk", entryID)
+		return false, ""
+	}
+
+	t.Run("entry_id 精确匹配互不覆盖", func(t *testing.T) {
+		proj := newFixture(t)
+		req := &TaskUpdateRequest{
+			ConfigID: "k2qskdc",
+			Tasks: []TaskUpdateItem{
+				{Name: "制衣", EntryID: "q4vuql0", Enabled: true,
+					SubOptions: []SubOptionUpdate{{Name: "ClothSlotOption", Type: "select", Value: "Slot3"}}},
+				{Name: "制衣", EntryID: "vwd11s4", Enabled: false,
+					SubOptions: []SubOptionUpdate{{Name: "ClothSlotOption", Type: "select", Value: "Slot1"}}},
+			},
+		}
+		if err := SaveConfig(proj, req); err != nil {
+			t.Fatal(err)
+		}
+		if enabled, caseName := readEntry(t, proj, "q4vuql0"); !enabled || caseName != "Slot3" {
+			t.Fatalf("q4vuql0 should keep its own update, got enabled=%v case=%s", enabled, caseName)
+		}
+		if enabled, caseName := readEntry(t, proj, "vwd11s4"); enabled || caseName != "Slot1" {
+			t.Fatalf("vwd11s4 should keep its own update, got enabled=%v case=%s", enabled, caseName)
+		}
+	})
+
+	t.Run("无 entry_id 回退按 taskName 同步全部同名条目", func(t *testing.T) {
+		proj := newFixture(t)
+		req := &TaskUpdateRequest{
+			Tasks: []TaskUpdateItem{{Name: "制衣", Enabled: false}},
+		}
+		if err := SaveConfig(proj, req); err != nil {
+			t.Fatal(err)
+		}
+		for _, entryID := range []string{"q4vuql0", "vwd11s4"} {
+			if enabled, _ := readEntry(t, proj, entryID); enabled {
+				t.Fatalf("Legacy taskName update should hit entry %s", entryID)
+			}
+		}
+	})
+
+	t.Run("未知 entry_id 不误伤其他条目", func(t *testing.T) {
+		proj := newFixture(t)
+		req := &TaskUpdateRequest{
+			Tasks: []TaskUpdateItem{
+				{Name: "制衣", EntryID: "ghost_entry", Enabled: false,
+					SubOptions: []SubOptionUpdate{{Name: "ClothSlotOption", Type: "select", Value: "Slot1"}}},
+			},
+		}
+		if err := SaveConfig(proj, req); err != nil {
+			t.Fatal(err)
+		}
+		if enabled, caseName := readEntry(t, proj, "q4vuql0"); !enabled || caseName != "Slot2" {
+			t.Fatalf("Stale entry_id must not clobber other entries, got enabled=%v case=%s", enabled, caseName)
+		}
+		if enabled, caseName := readEntry(t, proj, "vwd11s4"); !enabled || caseName != "Slot5" {
+			t.Fatalf("Stale entry_id must not clobber other entries, got enabled=%v case=%s", enabled, caseName)
+		}
+	})
+}
+
+// TestDuplicateTaskEntryAndEntryExists 条目复制：紧随原条目插入深拷贝、id 重新生成、其余字段保留
+func TestDuplicateTaskEntryAndEntryExists(t *testing.T) {
+	interfaceJSON := `{
+	  "name": "DupTest",
+	  "task": [{"name":"制衣","label":"制衣","default_check":true,"option":["ClothSlotOption"]}],
+	  "option": {
+	    "ClothSlotOption": {"type":"select","cases":["Slot1","Slot2"],"default_case":"Slot1"}
+	  }
+	}`
+	mxuJSON := `{
+	  "instances": [{"id":"k2qskdc","name":"默认配置","tasks":[
+	    {"id":"e1","taskName":"制衣","enabled":true,"expanded":true,
+	     "enabledByController":{"MuMu模拟器":true},
+	     "optionValues":{"ClothSlotOption":{"type":"select","caseName":"Slot2"}}},
+	    {"id":"e2","taskName":"登陆","enabled":false}
+	  ]}],
+	  "lastActiveInstanceId":"k2qskdc"
+	}`
+	_, proj := writeMXUProject(t, interfaceJSON, mxuJSON)
+
+	// 复制前存在性校验
+	if ok, err := TaskEntryExists(proj, "k2qskdc", "e1"); err != nil || !ok {
+		t.Fatalf("e1 should exist, got ok=%v err=%v", ok, err)
+	}
+	if ok, err := TaskEntryExists(proj, "", "ghost"); err != nil || ok {
+		t.Fatalf("ghost should not exist, got ok=%v err=%v", ok, err)
+	}
+
+	newID, err := DuplicateTaskEntry(proj, "k2qskdc", "e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newID == "" || newID == "e1" || len(newID) != 7 {
+		t.Fatalf("New entry id should be a fresh 7-char id, got %q", newID)
+	}
+	for _, ch := range newID {
+		if !strings.ContainsRune(mxuEntryIDChars, ch) {
+			t.Fatalf("New id should be lowercase alphanumeric, got %q", newID)
+		}
+	}
+
+	raw, err := os.ReadFile(proj.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root struct {
+		Instances []struct {
+			ID    string           `json:"id"`
+			Tasks []map[string]any `json:"tasks"`
+		} `json:"instances"`
+		LastActiveInstanceID string `json:"lastActiveInstanceId"`
+	}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	if len(root.Instances) != 1 || root.Instances[0].ID != "k2qskdc" {
+		t.Fatalf("Instance layout should be preserved: %+v", root.Instances)
+	}
+	tasks := root.Instances[0].Tasks
+	if len(tasks) != 3 {
+		t.Fatalf("Expected 3 entries after duplicate, got %d", len(tasks))
+	}
+	// 紧随原条目插入
+	if tasks[0]["id"] != "e1" || tasks[1]["id"] != newID || tasks[2]["id"] != "e2" {
+		t.Fatalf("Copy should be inserted right after the original, got ids %v/%v/%v", tasks[0]["id"], tasks[1]["id"], tasks[2]["id"])
+	}
+	copied := tasks[1]
+	if copied["taskName"] != "制衣" {
+		t.Fatalf("Copy should keep taskName, got %+v", copied)
+	}
+	if copied["enabled"] != true || copied["expanded"] != true {
+		t.Fatalf("Copy should keep enabled/expanded, got %+v", copied)
+	}
+	if ctrl, ok := copied["enabledByController"].(map[string]any); !ok || ctrl["MuMu模拟器"] != true {
+		t.Fatalf("Copy should deep-keep enabledByController, got %+v", copied["enabledByController"])
+	}
+	optVals, ok := copied["optionValues"].(map[string]any)
+	if !ok {
+		t.Fatalf("Copy should keep optionValues, got %+v", copied)
+	}
+	if opt, ok := optVals["ClothSlotOption"].(map[string]any); !ok || opt["caseName"] != "Slot2" {
+		t.Fatalf("Copy should deep-keep optionValues, got %+v", optVals)
+	}
+	if root.LastActiveInstanceID != "k2qskdc" {
+		t.Fatalf("Active instance should be untouched: %s", root.LastActiveInstanceID)
+	}
+
+	// 复制后新 id 可被校验到
+	if ok, err := TaskEntryExists(proj, "k2qskdc", newID); err != nil || !ok {
+		t.Fatalf("new entry should exist, got ok=%v err=%v", ok, err)
+	}
+
+	// 未知 entry_id -> ErrEntryNotFound
+	if _, err := DuplicateTaskEntry(proj, "k2qskdc", "ghost"); !errors.Is(err, ErrEntryNotFound) {
+		t.Fatalf("Expected ErrEntryNotFound for unknown entry, got %v", err)
 	}
 }
